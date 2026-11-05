@@ -51,14 +51,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Keygen { output } => {
-            // Note: In production, use ed25519-dalek to generate real keypairs.
-            // For now, we stub out a clean key generation hook.
+            use ed25519_dalek::SigningKey;
+            use getrandom::{SysRng, rand_core::UnwrapErr};
+
             println!("Generating Ed25519 keypair...");
+
+            let mut csprng = UnwrapErr(SysRng);
+            let signing_key = SigningKey::generate(&mut csprng);
+            let verifying_key = signing_key.verifying_key();
+
             let pub_path = format!("{}.pub", output);
             let priv_path = format!("{}.priv", output);
 
-            fs::write(&pub_path, "mock_ed25519_public_key_bytes")?;
-            fs::write(&priv_path, "mock_ed25519_private_key_bytes")?;
+            fs::write(&pub_path, hex::encode(verifying_key.to_bytes()))?;
+            fs::write(&priv_path, hex::encode(signing_key.to_bytes()))?;
 
             println!(
                 "Keys successfully generated:\n  Public:  {}\n  Private: {}",
@@ -70,9 +76,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             content,
             node_type,
             parent_id,
-            key_file: _,
+            key_file,
             output,
         } => {
+            // Load the Ed25519 signing key and derive the author's public key from it
+            let key_hex = fs::read_to_string(&key_file)?;
+            let key_bytes = hex::decode(key_hex.trim())?;
+            let key_array: [u8; 32] = key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "private key file must contain 32 hex-encoded bytes")?;
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
+            let author_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+
             let n_type = match node_type.to_lowercase().as_str() {
                 "root" => NodeType::Root,
                 "problem" => NodeType::Problem,
@@ -90,14 +106,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // Build node structure with all 6 required parameters
-            let node = DecisionNode::new(
+            let mut node = DecisionNode::new(
                 parent_node_id,
                 n_type,
                 title,
                 content,
                 vec![], // evidence_refs
-                "author_pubkey_placeholder".into(),
+                author_pubkey,
             );
+
+            // Sign the node's content-addressable ID with the loaded private key
+            node.sign(&signing_key);
 
             // Serialize and save to disk
             let json = serde_json::to_string_pretty(&node)?;

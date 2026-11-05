@@ -88,27 +88,8 @@ impl DecisionNode {
     ) -> Self {
         let created_at = chrono::Utc::now();
 
-        // Convert parent_id to string for canonical hashing
-        let parent_str = parent_id
-            .as_ref()
-            .map(|p| p.0.clone())
-            .unwrap_or_else(|| "ROOT".into());
-
-        // Construct a canonical payload string for content-addressable hashing
-        let raw_payload = format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            parent_str,
-            serde_json::to_string(&node_type).unwrap_or_default(),
-            title,
-            content,
-            evidence_refs.join(","),
-            author_pubkey,
-            created_at.timestamp()
-        );
-
-        // Compute Blake3 hash for the unique NodeId
-        let hash = blake3::hash(raw_payload.as_bytes());
-        let id = NodeId(hash.to_hex().to_string());
+        // Compute the content-addressable NodeId, matching the fields checked by `verify`.
+        let id = NodeId::compute(node_type, parent_id.as_ref(), &title, &content, &author_pubkey);
 
         Self {
             id,
@@ -118,9 +99,18 @@ impl DecisionNode {
             content,
             evidence_refs,
             author_pubkey,
-            author_signature: "placeholder_signature".into(), // Populated by signing
+            author_signature: String::new(), // Populated by `sign`
             created_at,
         }
+    }
+
+    /// Signs the node's content-addressable ID with the given Ed25519 signing key,
+    /// populating `author_signature`. The caller must ensure `author_pubkey` already
+    /// matches `signing_key`, since it is baked into the ID that gets signed.
+    pub fn sign(&mut self, signing_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(self.id.0.as_bytes());
+        self.author_signature = hex::encode(signature.to_bytes());
     }
 }
 
@@ -181,4 +171,57 @@ pub trait GraphStore {
     fn get_node(&self, id: &NodeId) -> Result<Option<DecisionNode>, Self::Error>;
     fn put_node(&mut self, node: &DecisionNode) -> Result<(), Self::Error>;
     fn get_children(&self, id: &NodeId) -> Result<Vec<DecisionNode>, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn test_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn signed_node(key: &SigningKey) -> DecisionNode {
+        let author_pubkey = hex::encode(key.verifying_key().to_bytes());
+        let mut node = DecisionNode::new(
+            None,
+            NodeType::Root,
+            "Title".into(),
+            "Content".into(),
+            vec![],
+            author_pubkey,
+        );
+        node.sign(key);
+        node
+    }
+
+    #[test]
+    fn sign_and_verify_round_trip() {
+        let node = signed_node(&test_key());
+        node.verify().expect("freshly signed node should verify");
+    }
+
+    #[test]
+    fn tampered_content_fails_verification() {
+        let mut node = signed_node(&test_key());
+        node.content = "Tampered content".into();
+        assert!(matches!(node.verify(), Err(CoreError::HashMismatch { .. })));
+    }
+
+    #[test]
+    fn tampered_signature_fails_verification() {
+        let mut node = signed_node(&test_key());
+        node.author_signature = hex::encode([0u8; 64]);
+        assert!(matches!(node.verify(), Err(CoreError::InvalidSignature)));
+    }
+
+    #[test]
+    fn wrong_key_signature_fails_verification() {
+        let node = signed_node(&test_key());
+        let other_key = SigningKey::from_bytes(&[9u8; 32]);
+        let mut forged = node.clone();
+        forged.sign(&other_key);
+        assert!(matches!(forged.verify(), Err(CoreError::InvalidSignature)));
+    }
 }
