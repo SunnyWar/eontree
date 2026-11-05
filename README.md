@@ -29,7 +29,7 @@ eontree/
 ### 2. `eontree-jury` (`crates/eontree-jury`)
 
 * **Global Sentinel Protocol (`sentinel.rs`):** An ethical pre-filter that evaluates incoming nodes against dynamic graph-defined axioms and constraints to prevent biosphere degradation or non-anthropocentric suffering.
-* **Weighted Epistemic Jury (`jury.rs`):** An asynchronous evaluation engine (`tokio` + `reqwest`) that dispatches parallel audits across three independent LLM endpoints and folds their opinions into a single weighted `NodeScorecard`, replacing rigid pass/fail voting with graded-merit scoring. The passing threshold scales with node criticality: `Root`/`Barrier` nodes require a higher composite score than exploratory `Unknown` nodes.
+* **Weighted Epistemic Jury (`jury.rs`):** An asynchronous evaluation engine (`tokio` + `reqwest`) that dispatches parallel audits across three independent LLM endpoints, each rating the node across six `NodeMetrics` dimensions (plausibility, evidence strength, predictive power, novelty, explanatory power, solution relevance). The judges' metrics are averaged and folded into a single `NodeScorecard` using configurable `MetricWeights`, replacing rigid pass/fail voting with graded-merit scoring. The passing threshold scales with node criticality: `Root`/`Barrier` nodes require a higher composite score than exploratory `Unknown` nodes.
 
 ### 3. `eontree-api` (`crates/eontree-api`)
 

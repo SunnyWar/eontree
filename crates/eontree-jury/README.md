@@ -6,7 +6,7 @@
 
 ---
 
-## Core Architecture
+# Core Architecture
 
 To balance absolute platform openness with uncompromising academic and ethical rigor, `eontree-jury` implements a two-stage evaluation pipeline:
 
