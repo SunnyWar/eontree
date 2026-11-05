@@ -45,7 +45,7 @@ impl NodeId {
         hasher.update(title.as_bytes());
         hasher.update(content.as_bytes());
         hasher.update(author_pubkey.as_bytes());
-        
+
         Self(hasher.finalize().to_hex().to_string())
     }
 }
@@ -87,7 +87,7 @@ impl DecisionNode {
             &self.content,
             &self.author_pubkey,
         );
-        
+
         if self.id != expected_id {
             return Err(CoreError::HashMismatch {
                 expected: expected_id.0,
@@ -96,22 +96,30 @@ impl DecisionNode {
         }
 
         // 2. Verify Ed25519 signature
-        let pubkey_bytes = hex::decode(&self.author_pubkey)
-            .map_err(|_| CoreError::InvalidSignature)?;
-        let sig_bytes = hex::decode(&self.author_signature)
-            .map_err(|_| CoreError::InvalidSignature)?;
-            
+        let pubkey_bytes =
+            hex::decode(&self.author_pubkey).map_err(|_| CoreError::InvalidSignature)?;
+        let sig_bytes =
+            hex::decode(&self.author_signature).map_err(|_| CoreError::InvalidSignature)?;
+
         let public_key = ed25519_dalek::VerifyingKey::from_bytes(
-            pubkey_bytes.as_slice().try_into().map_err(|_| CoreError::InvalidSignature)?
-        ).map_err(|_| CoreError::InvalidSignature)?;
-        
+            pubkey_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoreError::InvalidSignature)?,
+        )
+        .map_err(|_| CoreError::InvalidSignature)?;
+
         let signature = ed25519_dalek::Signature::from_bytes(
-            sig_bytes.as_slice().try_into().map_err(|_| CoreError::InvalidSignature)?
+            sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CoreError::InvalidSignature)?,
         );
 
         // Sign over the hash ID string payload
         use ed25519_dalek::Verifier;
-        public_key.verify(self.id.0.as_bytes(), &signature)
+        public_key
+            .verify(self.id.0.as_bytes(), &signature)
             .map_err(|_| CoreError::InvalidSignature)?;
 
         Ok(())

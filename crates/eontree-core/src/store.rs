@@ -1,11 +1,12 @@
 use crate::{DecisionNode, GraphStore, NodeId};
+use redb::ReadableDatabase;
 use redb::{Database, TableDefinition};
 use std::path::Path;
-use redb::ReadableDatabase;
 
 const NODES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("eontree_nodes");
 // Composite key: (parent_id, child_id) -> ()
-const CHILDREN_INDEX: TableDefinition<(&str, &str), ()> = TableDefinition::new("eontree_children_index");
+const CHILDREN_INDEX: TableDefinition<(&str, &str), ()> =
+    TableDefinition::new("eontree_children_index");
 
 pub struct RedbStore {
     db: Database,
@@ -15,7 +16,7 @@ impl RedbStore {
     /// Opens or creates a redb database at the specified file path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
-        
+
         // Initialize tables during startup
         let write_txn = db.begin_write()?;
         write_txn.open_table(NODES_TABLE)?;
@@ -32,7 +33,7 @@ impl GraphStore for RedbStore {
     fn get_node(&self, id: &NodeId) -> Result<Option<DecisionNode>, Self::Error> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(NODES_TABLE)?;
-        
+
         if let Some(bytes) = table.get(id.0.as_str())? {
             let node: DecisionNode = serde_json::from_slice(bytes.value())?;
             Ok(Some(node))
@@ -69,7 +70,7 @@ impl GraphStore for RedbStore {
         let nodes_table = read_txn.open_table(NODES_TABLE)?;
 
         let mut child_nodes = Vec::new();
-        
+
         // Range query over composite keys starting with the parent_id
         let lower_bound = (id.0.as_str(), "");
         let upper_bound = (id.0.as_str(), "\u{10ffff}"); // max unicode char
@@ -78,7 +79,7 @@ impl GraphStore for RedbStore {
             let entry = entry?;
             let key_guard = entry.0;
             let (_, child_id_str) = key_guard.value();
-            
+
             if let Some(bytes) = nodes_table.get(child_id_str)? {
                 let node: DecisionNode = serde_json::from_slice(bytes.value())?;
                 child_nodes.push(node);
