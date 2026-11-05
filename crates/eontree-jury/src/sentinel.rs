@@ -40,6 +40,26 @@ impl GlobalSentinel {
 
         Ok(())
     }
+
+    pub fn validate_taxonomy(
+        parent_node: &DecisionNode,
+        child_node: &DecisionNode,
+    ) -> Result<(), &'static str> {
+        match (parent_node.node_type, child_node.node_type) {
+            // Allow recursive problem decomposition (Problem broken into Sub-Problems)
+            (NodeType::Problem, NodeType::Problem) => Ok(()),
+
+            // Allow standard downward flows
+            (NodeType::Root, NodeType::Problem) => Ok(()),
+            (NodeType::Problem, NodeType::Unknown) | (NodeType::Problem, NodeType::Barrier) => {
+                Ok(())
+            }
+            (NodeType::Barrier, NodeType::Innovation) => Ok(()),
+            (NodeType::Unknown, NodeType::Innovation) => Ok(()),
+
+            _ => Err("Invalid taxonomic transition in decision tree hierarchy"),
+        }
+    }
 }
 
 #[cfg(test)]

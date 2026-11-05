@@ -82,6 +82,8 @@ enum PostNodeError {
     PolicyViolation,
     JuryRejected(NodeScorecard),
     Internal,
+    ParentNotFound,
+    InvalidTaxonomy,
 }
 
 impl IntoResponse for PostNodeError {
@@ -93,6 +95,8 @@ impl IntoResponse for PostNodeError {
                 (StatusCode::UNPROCESSABLE_ENTITY, Json(scorecard)).into_response()
             }
             PostNodeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            PostNodeError::ParentNotFound => StatusCode::NOT_FOUND.into_response(),
+            PostNodeError::InvalidTaxonomy => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
         }
     }
 }
@@ -108,7 +112,20 @@ async fn post_node_handler(
 
     let mut store = state.store.lock().await;
 
-    // Hard invariant 2: Global Sentinel ethical pre-filter must pass.
+    // Hard invariant 2: Structural Parent & Taxonomic Validation
+    if let Some(ref parent_id) = node.parent_id {
+        let parent_node = store
+            .get_node(parent_id)
+            .map_err(|_| PostNodeError::Internal)?
+            .ok_or(PostNodeError::ParentNotFound)?; // Ensure parent exists
+
+        // Validate taxonomic transition (permits Problem -> Problem decomposition)
+        if GlobalSentinel::validate_taxonomy(&parent_node, &node).is_err() {
+            return Err(PostNodeError::InvalidTaxonomy);
+        }
+    }
+
+    // Hard invariant 3: Global Sentinel ethical pre-filter must pass.
     if GlobalSentinel::evaluate(&*store, &state.root_axiom_id, &node).is_err() {
         return Err(PostNodeError::PolicyViolation);
     }
@@ -136,6 +153,7 @@ async fn post_node_handler(
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use eontree_core::NodeType;
     use tempfile::TempDir;
 
     fn test_key() -> SigningKey {
@@ -209,12 +227,21 @@ mod tests {
     async fn get_children_handler_returns_children_of_parent() {
         let (state, _dir) = test_state();
         let key = test_key();
-        let parent = signed_node(&key, None, "Parent");
+
+        // Create a Root node as the parent
+        let mut parent = signed_node(&key, None, "Parent");
+        parent.node_type = NodeType::Root;
+        // Re-sign or update hash if your test helper requires it, or construct it directly:
+        // (Assuming signed_node allows setting type or you can adjust field directly)
+
         post_node_handler(State(state.clone()), Json(parent.clone()))
             .await
             .unwrap();
 
-        let child = signed_node(&key, Some(parent.id.clone()), "Child");
+        // Create a Problem child under the Root parent (or Problem -> Problem sub-problem)
+        let mut child = signed_node(&key, Some(parent.id.clone()), "Child");
+        child.node_type = NodeType::Problem;
+
         post_node_handler(State(state.clone()), Json(child.clone()))
             .await
             .unwrap();
