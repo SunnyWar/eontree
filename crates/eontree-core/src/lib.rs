@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod store;
+
 #[derive(Error, Debug)]
 pub enum CoreError {
     #[error("Cryptographic signature verification failed")]
