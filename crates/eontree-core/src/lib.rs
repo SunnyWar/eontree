@@ -89,7 +89,13 @@ impl DecisionNode {
         let created_at = chrono::Utc::now();
 
         // Compute the content-addressable NodeId, matching the fields checked by `verify`.
-        let id = NodeId::compute(node_type, parent_id.as_ref(), &title, &content, &author_pubkey);
+        let id = NodeId::compute(
+            node_type,
+            parent_id.as_ref(),
+            &title,
+            &content,
+            &author_pubkey,
+        );
 
         Self {
             id,
