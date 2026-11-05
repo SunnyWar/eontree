@@ -54,3 +54,31 @@ cargo run --bin eontree-cli -- submit \
 
 * **Success:** Returns `201 Created` upon passing all validation checks and being written to the persistent `redb` store.
 * **Rejection:** Returns `422 Unprocessable Entity` if flagged by the Sentinel, or if the weighted jury score falls below the node's passing threshold (the response body includes the `NodeScorecard` for review).
+
+---
+
+## 4. List the Opposition Todo Queue (`list-todos`)
+
+Fetches every node currently awaiting community critique (`PendingOpposition` status) from a running `eontree-api` server: the adversarial objections, failure modes, and competing alternatives automatically spawned alongside each approved `Innovation`/`Problem` node.
+
+```bash
+cargo run --bin eontree-cli -- list-todos --endpoint "http://127.0.0.1:8080"
+
+```
+
+* **Output:** Prints each stub's node type, title, ID, and parent ID.
+
+---
+
+## 5. Claim a Todo Stub (`claim`)
+
+Fetches a `PendingOpposition` stub by ID, lets you supply real argumentation and evidence, signs a new node with your own key (reusing the stub's parent and taxonomic type), and submits it to the server.
+
+```bash
+cargo run --bin eontree-cli -- claim --todo-id "stub_node_id_hash" --content "A rigorous, evidence-backed counter-argument fleshing out the stub." --evidence "doi:10.1016/example, https://example.com/report" --key-file "my_key.priv" --endpoint "http://127.0.0.1:8080" --output "claimed_node.json"
+
+```
+
+* **Behavior:** The claimed node is a brand-new, independently signed `DecisionNode` (content-addressable IDs can't be reused across different authors/content); the original stub remains in the graph as a historical `PendingOpposition` record.
+* **Success:** Returns `201 Created` upon passing all validation checks, with the new node saved locally to `claimed_node.json`.
+* **Rejection:** Same failure modes as `submit` (invalid signature, Sentinel/taxonomy violation, or jury score below threshold).

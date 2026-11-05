@@ -63,6 +63,16 @@ pub enum EdgeType {
     Evidences,
 }
 
+/// Lifecycle status of a node. This is administrative metadata, not part of the
+/// content-addressable payload: toggling it does not change a node's NodeId and
+/// therefore never invalidates its author's signature (which covers only the ID).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeStatus {
+    Active,
+    /// Automatically generated adversarial stub waiting for community critique.
+    PendingOpposition,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionNode {
     pub id: NodeId,
@@ -74,6 +84,10 @@ pub struct DecisionNode {
     pub author_pubkey: String,
     pub author_signature: String,
     pub created_at: DateTime<Utc>,
+    pub status: NodeStatus,
+    /// IDs of adversarial counter-nodes (objections, failure modes, alternatives)
+    /// automatically spawned alongside this node.
+    pub counter_node_ids: Vec<NodeId>,
 }
 
 impl DecisionNode {
@@ -107,6 +121,8 @@ impl DecisionNode {
             author_pubkey,
             author_signature: String::new(), // Populated by `sign`
             created_at,
+            status: NodeStatus::Active,
+            counter_node_ids: Vec::new(),
         }
     }
 
@@ -177,6 +193,9 @@ pub trait GraphStore {
     fn get_node(&self, id: &NodeId) -> Result<Option<DecisionNode>, Self::Error>;
     fn put_node(&mut self, node: &DecisionNode) -> Result<(), Self::Error>;
     fn get_children(&self, id: &NodeId) -> Result<Vec<DecisionNode>, Self::Error>;
+    /// Lists every node currently in the given lifecycle status (e.g., the
+    /// community-opposition "todo queue" of `PendingOpposition` stubs).
+    fn list_by_status(&self, status: NodeStatus) -> Result<Vec<DecisionNode>, Self::Error>;
 }
 
 #[cfg(test)]
@@ -229,5 +248,15 @@ mod tests {
         let mut forged = node.clone();
         forged.sign(&other_key);
         assert!(matches!(forged.verify(), Err(CoreError::InvalidSignature)));
+    }
+
+    #[test]
+    fn status_and_counter_node_ids_are_not_part_of_the_signed_payload() {
+        let mut node = signed_node(&test_key());
+        node.status = NodeStatus::PendingOpposition;
+        node.counter_node_ids = vec![NodeId("some-counter-node".into())];
+
+        node.verify()
+            .expect("administrative metadata should not affect verification");
     }
 }

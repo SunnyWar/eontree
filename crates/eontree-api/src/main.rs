@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use eontree_core::{DecisionNode, GraphStore, NodeId, store::RedbStore};
+use eontree_core::{DecisionNode, GraphStore, NodeId, NodeStatus, NodeType, store::RedbStore};
 use eontree_jury::{GlobalSentinel, LLMJudgeClient, NodeScorecard};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,6 +14,10 @@ struct AppState {
     store: Mutex<RedbStore>,
     jury: LLMJudgeClient,
     root_axiom_id: NodeId,
+    // Signs automatically generated adversarial stub nodes. Every node must
+    // carry a valid self-contained signature, so the system signs its own
+    // stubs rather than bypassing verification for them.
+    system_signing_key: ed25519_dalek::SigningKey,
 }
 
 #[tokio::main]
@@ -29,10 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "https://api.judge-gamma.eontree.org/v1/eval".into(),
         ]),
         root_axiom_id: NodeId("root_axiom_placeholder_hash".into()),
+        system_signing_key: generate_system_signing_key(),
     });
 
     // 2. Build Axum router
     let app = Router::new()
+        .route("/nodes/todos", get(get_todos_handler))
         .route("/nodes/:id", get(get_node_handler))
         .route("/nodes/:id/children", get(get_children_handler))
         .route("/nodes", post(post_node_handler))
@@ -44,6 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn generate_system_signing_key() -> ed25519_dalek::SigningKey {
+    use ed25519_dalek::SigningKey;
+    use getrandom::{SysRng, rand_core::UnwrapErr};
+
+    let mut csprng = UnwrapErr(SysRng);
+    SigningKey::generate(&mut csprng)
 }
 
 async fn get_node_handler(
@@ -69,6 +83,19 @@ async fn get_children_handler(
 
     match store.get_children(&node_id) {
         Ok(children) => Ok(Json(children)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+// Lists the community-opposition "todo queue": auto-generated stubs waiting
+// for a contributor to flesh out and claim.
+async fn get_todos_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DecisionNode>>, StatusCode> {
+    let store = state.store.lock().await;
+
+    match store.list_by_status(NodeStatus::PendingOpposition) {
+        Ok(nodes) => Ok(Json(nodes)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -101,9 +128,61 @@ impl IntoResponse for PostNodeError {
     }
 }
 
+// Templates for the mandatory adversarial counter-nodes spawned alongside every
+// Innovation/Problem proposal: an objection, a failure mode, and a competing
+// alternative, each left as a PendingOpposition stub for the community to flesh
+// out. These are deterministic, server-authored content, so they are written
+// directly to the store rather than re-entering the public ingestion pipeline
+// (no Sentinel/taxonomy re-check against the submitter's own node).
+const ADVERSARIAL_TEMPLATES: [(&str, NodeType, &str); 3] = [
+    (
+        "Objections to: ",
+        NodeType::Barrier,
+        "Potential drawbacks, ethical concerns, or logical flaws.",
+    ),
+    (
+        "Failure Modes of: ",
+        NodeType::Barrier,
+        "Conditions under which this approach breaks down catastrophically.",
+    ),
+    (
+        "Competing Alternatives to: ",
+        NodeType::Unknown,
+        "Alternative methods achieving the same objective.",
+    ),
+];
+
+fn spawn_mandatory_counter_nodes<S: GraphStore>(
+    store: &mut S,
+    parent_node: &DecisionNode,
+    system_signing_key: &ed25519_dalek::SigningKey,
+) -> Result<Vec<NodeId>, S::Error> {
+    let system_pubkey = hex::encode(system_signing_key.verifying_key().to_bytes());
+
+    let mut generated_ids = Vec::with_capacity(ADVERSARIAL_TEMPLATES.len());
+    for (prefix, node_type, default_content) in ADVERSARIAL_TEMPLATES {
+        let title = format!("{prefix}{}", parent_node.title);
+        let mut counter_node = DecisionNode::new(
+            Some(parent_node.id.clone()),
+            node_type,
+            title,
+            default_content.to_string(),
+            vec![],
+            system_pubkey.clone(),
+        );
+        counter_node.status = NodeStatus::PendingOpposition;
+        counter_node.sign(system_signing_key);
+
+        store.put_node(&counter_node)?;
+        generated_ids.push(counter_node.id);
+    }
+
+    Ok(generated_ids)
+}
+
 async fn post_node_handler(
     State(state): State<Arc<AppState>>,
-    Json(node): Json<DecisionNode>,
+    Json(mut node): Json<DecisionNode>,
 ) -> Result<StatusCode, PostNodeError> {
     // Hard invariant 1: cryptographic signature must be valid.
     if node.verify().is_err() {
@@ -144,6 +223,17 @@ async fn post_node_handler(
     // Persist only once every gate has passed.
     if store.put_node(&node).is_err() {
         return Err(PostNodeError::Internal);
+    }
+
+    // Automatically spawn the mandatory adversarial counter-nodes (objections,
+    // failure modes, competing alternatives) for primary proposals, and link
+    // them back onto the parent record.
+    if matches!(node.node_type, NodeType::Innovation | NodeType::Problem) {
+        let counter_ids =
+            spawn_mandatory_counter_nodes(&mut *store, &node, &state.system_signing_key)
+                .map_err(|_| PostNodeError::Internal)?;
+        node.counter_node_ids = counter_ids;
+        store.put_node(&node).map_err(|_| PostNodeError::Internal)?;
     }
 
     Ok(StatusCode::CREATED)
@@ -194,6 +284,7 @@ mod tests {
                 "http://judge-gamma.invalid".into(),
             ]),
             root_axiom_id: NodeId("root_axiom".into()),
+            system_signing_key: SigningKey::from_bytes(&[6u8; 32]),
         });
         (state, dir)
     }
@@ -258,14 +349,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(children.0.len(), 1);
-        assert_eq!(children.0[0].id, child.id);
+        // The parent also spawns 3 adversarial counter-nodes, but only the
+        // explicitly posted child should show up here.
+        assert!(children.0.iter().any(|c| c.id == child.id));
+        assert_eq!(children.0.iter().filter(|c| c.id == child.id).count(), 1);
     }
 
     #[tokio::test]
     async fn get_children_handler_returns_empty_for_childless_node() {
         let (state, _dir) = test_state();
-        let node = signed_node(&test_key(), None, "Lonely");
+        // Unknown nodes don't trigger adversarial counter-node spawning and
+        // clear the (lower) jury threshold for their type, so a freshly
+        // posted one genuinely has no children.
+        let node = signed_node_with_type(&test_key(), None, NodeType::Unknown, "Lonely");
         post_node_handler(State(state.clone()), Json(node.clone()))
             .await
             .unwrap();
@@ -275,5 +371,50 @@ mod tests {
             .unwrap();
 
         assert!(children.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_node_handler_spawns_counter_nodes_for_innovation() {
+        let (state, _dir) = test_state();
+        let node = signed_node(&test_key(), None, "New Approach");
+
+        post_node_handler(State(state.clone()), Json(node.clone()))
+            .await
+            .unwrap();
+
+        let fetched = get_node_handler(State(state.clone()), Path(node.id.0.clone()))
+            .await
+            .unwrap();
+        assert_eq!(fetched.0.counter_node_ids.len(), 3);
+
+        let children = get_children_handler(State(state), Path(node.id.0.clone()))
+            .await
+            .unwrap();
+        assert_eq!(children.0.len(), 3);
+        assert!(
+            children
+                .0
+                .iter()
+                .all(|c| c.status == NodeStatus::PendingOpposition)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_todos_handler_lists_pending_opposition_stubs() {
+        let (state, _dir) = test_state();
+        let node = signed_node(&test_key(), None, "New Approach");
+
+        post_node_handler(State(state.clone()), Json(node.clone()))
+            .await
+            .unwrap();
+
+        let todos = get_todos_handler(State(state)).await.unwrap();
+        assert_eq!(todos.0.len(), 3);
+        assert!(
+            todos
+                .0
+                .iter()
+                .all(|t| t.status == NodeStatus::PendingOpposition)
+        );
     }
 }

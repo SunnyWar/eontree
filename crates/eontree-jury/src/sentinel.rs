@@ -89,6 +89,13 @@ mod tests {
                 Ok(self.children.clone())
             }
         }
+
+        fn list_by_status(
+            &self,
+            _status: eontree_core::NodeStatus,
+        ) -> Result<Vec<DecisionNode>, Self::Error> {
+            unimplemented!("not exercised by GlobalSentinel::evaluate")
+        }
     }
 
     fn constraint(node_type: NodeType, title: &str, content: &str) -> DecisionNode {

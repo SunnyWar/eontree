@@ -23,7 +23,7 @@ eontree/
 
 ### 1. `eontree-core` (`crates/eontree-core`)
 
-* **Purpose:** Defines the foundational taxonomy (`NodeType`: `Root`, `Problem`, `Unknown`, `Barrier`, `Innovation`), content-addressable identifiers (`NodeId` via Blake3 hashes), and Ed25519 cryptographic provenance verification.
+* **Purpose:** Defines the foundational taxonomy (`NodeType`: `Root`, `Problem`, `Unknown`, `Barrier`, `Innovation`), content-addressable identifiers (`NodeId` via Blake3 hashes), Ed25519 cryptographic provenance verification, and node lifecycle status (`NodeStatus`: `Active` vs. `PendingOpposition`).
 * **Storage:** Implements persistent ACID-compliant storage via **`redb`** (`RedbStore`), maintaining fast parent-child adjacency indexing for graph traversal without external C dependencies.
 
 ### 2. `eontree-jury` (`crates/eontree-jury`)
@@ -34,11 +34,11 @@ eontree/
 ### 3. `eontree-api` (`crates/eontree-api`)
 
 * **Purpose:** A high-performance Axum REST server managing concurrent state via interior mutability (`Mutex<RedbStore>`).
-* **Endpoints:** Exposes HTTP routes for fetching nodes (`GET /nodes/:id`), traversing children (`GET /nodes/:id/children`), and submitting cryptographically signed proposals through the validation pipeline (`POST /nodes`).
+* **Endpoints:** Exposes HTTP routes for fetching nodes (`GET /nodes/:id`), traversing children (`GET /nodes/:id/children`), listing auto-generated adversarial stubs (`GET /nodes/todos`), and submitting cryptographically signed proposals through the validation pipeline (`POST /nodes`). Every approved `Innovation`/`Problem` node automatically spawns three linked `PendingOpposition` counter-node stubs (an objection, a failure mode, and a competing alternative) for the community to flesh out.
 
 ### 4. `eontree-cli` (`crates/eontree-cli`)
 
-* **Purpose:** Local command-line interface for offline node authoring, cryptographic signing, batch validation, and graph benchmarking.
+* **Purpose:** Local command-line interface for offline node authoring, cryptographic signing, submission, browsing the auto-generated opposition "todo queue" (`list-todos`), and claiming a stub to flesh out with real content (`claim`).
 
 ---
 

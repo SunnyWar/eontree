@@ -43,6 +43,22 @@ pub struct DecisionNode {
     pub author_pubkey: String,                // Hex-encoded Ed25519 public key
     pub author_signature: String,             // Hex-encoded Ed25519 signature over node ID
     pub created_at: DateTime<Utc>,            // UTC timestamp
+    pub status: NodeStatus,                   // Active or PendingOpposition
+    pub counter_node_ids: Vec<NodeId>,        // Linked adversarial counter-nodes, if any
+}
+
+```
+
+`status` and `counter_node_ids` are administrative lifecycle metadata, not part of the
+immutable content payload: they are excluded from both the Blake3 hash and the signed
+payload, so updating them never invalidates a node's `NodeId` or its author's signature.
+
+### `NodeStatus`
+
+```rust
+pub enum NodeStatus {
+    Active,
+    PendingOpposition, // Automatically generated stub awaiting community critique
 }
 
 ```
@@ -67,6 +83,7 @@ pub trait GraphStore {
     fn get_node(&self, id: &NodeId) -> Result<Option<DecisionNode>, Self::Error>;
     fn put_node(&mut self, node: &DecisionNode) -> Result<(), Self::Error>;
     fn get_children(&self, id: &NodeId) -> Result<Vec<DecisionNode>, Self::Error>;
+    fn list_by_status(&self, status: NodeStatus) -> Result<Vec<DecisionNode>, Self::Error>;
 }
 
 ```
@@ -76,32 +93,28 @@ pub trait GraphStore {
 ## Usage Example
 
 ```rust
-use eontree_core::{NodeType, NodeId, DecisionNode};
-use chrono::Utc;
+use eontree_core::{DecisionNode, NodeType};
+use ed25519_dalek::SigningKey;
 
-// 1. Compute a deterministic content ID
-let parent_id = None;
-let node_type = NodeType::Problem;
-let title = "Systemic Resource Scarcity";
-let content = "Finite planetary mineral limits constrain infinite exponential extraction models.";
-let pubkey = "a1b2c3d4..."; // author Ed25519 public key hex
+// 1. Load or generate the author's Ed25519 signing key
+let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+let author_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
 
-let id = NodeId::compute(node_type, parent_id.as_ref(), title, content, pubkey);
+// 2. Construct the node; `DecisionNode::new` computes its content-addressable
+// NodeId automatically and defaults status to Active with no counter-nodes.
+let mut node = DecisionNode::new(
+    None, // parent_id
+    NodeType::Problem,
+    "Systemic Resource Scarcity".to_string(),
+    "Finite planetary mineral limits constrain infinite exponential extraction models.".to_string(),
+    vec!["doi:10.1016/example".into()],
+    author_pubkey,
+);
 
-// 2. Construct the node
-let node = DecisionNode {
-    id,
-    parent_id,
-    node_type,
-    title: title.to_string(),
-    content: content.to_string(),
-    evidence_refs: vec!["doi:10.1016/example".into()],
-    author_pubkey: pubkey.to_string(),
-    author_signature: "sig_hex_string...".to_string(),
-    created_at: Utc::now(),
-};
+// 3. Sign the node's ID with the author's key
+node.sign(&signing_key);
 
-// 3. Verify cryptographic and hash integrity
+// 4. Verify cryptographic and hash integrity
 assert!(node.verify().is_ok());
 
 ```

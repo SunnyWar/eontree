@@ -1,5 +1,6 @@
-use crate::{DecisionNode, GraphStore, NodeId};
+use crate::{DecisionNode, GraphStore, NodeId, NodeStatus};
 use redb::ReadableDatabase;
+use redb::ReadableTable;
 use redb::{Database, TableDefinition};
 use std::path::Path;
 
@@ -87,6 +88,22 @@ impl GraphStore for RedbStore {
         }
 
         Ok(child_nodes)
+    }
+
+    fn list_by_status(&self, status: NodeStatus) -> Result<Vec<DecisionNode>, Self::Error> {
+        let read_txn = self.db.begin_read()?;
+        let nodes_table = read_txn.open_table(NODES_TABLE)?;
+
+        let mut matches = Vec::new();
+        for entry in nodes_table.iter()? {
+            let (_, value_guard) = entry?;
+            let node: DecisionNode = serde_json::from_slice(value_guard.value())?;
+            if node.status == status {
+                matches.push(node);
+            }
+        }
+
+        Ok(matches)
     }
 }
 
@@ -179,5 +196,26 @@ mod tests {
         store.put_node(&node).unwrap();
 
         assert!(store.get_children(&node.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_by_status_returns_only_matching_nodes() {
+        let (mut store, _dir) = open_temp_store();
+        let key = test_key();
+
+        let active = signed_node(&key, None, "Active Node");
+        store.put_node(&active).unwrap();
+
+        let mut stub = signed_node(&key, None, "Stub Node");
+        stub.status = NodeStatus::PendingOpposition;
+        store.put_node(&stub).unwrap();
+
+        let pending = store.list_by_status(NodeStatus::PendingOpposition).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, stub.id);
+
+        let active_nodes = store.list_by_status(NodeStatus::Active).unwrap();
+        assert_eq!(active_nodes.len(), 1);
+        assert_eq!(active_nodes[0].id, active.id);
     }
 }
