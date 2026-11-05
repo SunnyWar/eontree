@@ -10,8 +10,8 @@
 
 To balance absolute platform openness with uncompromising academic and ethical rigor, `eontree-jury` implements a two-stage evaluation pipeline:
 
-1. **The Global Sentinel Protocol (Ethical Pre-Filter):** A fast-path security and meta-constraint layer that intercepts proposals before compute is spent on full LLM audits.
-2. **The Triple-LLM Jury (Parallel Consensus Auditor):** An asynchronous asynchronous audit pipeline that dispatches evaluation prompts to three independent LLM endpoints in parallel, enforcing a strict $2/3$ majority agreement.
+1. **The Global Sentinel Protocol (Ethical Pre-Filter):** A fast-path security and meta-constraint layer that intercepts proposals before compute is spent on full LLM audits. This is a hard invariant: strictly binary pass/fail.
+2. **The Weighted Epistemic Jury (Graded-Merit Auditor):** An asynchronous audit pipeline that dispatches evaluation prompts to three independent LLM endpoints in parallel and folds their opinions into a single weighted `NodeScorecard`, replacing rigid binary pass/fail judging with graded-merit scoring.
 
 ---
 
@@ -24,29 +24,42 @@ The Sentinel evaluates every incoming `DecisionNode` against EonTree's core non-
 
 ---
 
-## 2. The Triple-LLM Jury & Consensus Engine (`jury.rs`)
+## 2. The Weighted Epistemic Jury & Scoring Engine (`jury.rs`)
 
-Once a node passes the Sentinel pre-filter, it enters the consensus pipeline managed by `LLMJudgeClient`:
+Once a node passes the Sentinel pre-filter, it enters the graded-merit evaluation pipeline managed by `LLMJudgeClient`:
 
 * **Parallel Asynchronous Dispatch:** Utilizes `tokio` and `reqwest` to dispatch evaluation payloads simultaneously across three independent judge endpoints (`Judge-Alpha`, `Judge-Beta`, `Judge-Gamma`) using `tokio::join!`.
-* **Structured Scorecards:** Each judge returns a rigorous JSON scorecard evaluating the proposal across logical validity, clarity, and evidence backing.
-* **The 2-of-3 Rule:** A reducer aggregates the scorecard votes. If fewer than 2 out of 3 judges vote `approved: true`, the consensus engine rejects the commit and returns a `JuryError::ConsensusFailed`.
+* **Graded Merit Scoring:** Each judge contributes an equally-weighted `EvaluationCriterion` (derived from its logic and clarity ratings) instead of casting a binary approve/reject vote.
+* **Composite Threshold Check:** `LLMJudgeClient::evaluate_node_weighted` folds the three criteria into a single `NodeScorecard`. A node is approved only if its weighted composite score meets or exceeds `passing_threshold`, which scales with node criticality: `Root`/`Barrier` nodes require `0.9`, `Problem`/`Innovation` require `0.75`, and exploratory `Unknown` nodes require only `0.6`.
 
 ---
 
 ## Data Structures
 
-### `JudgeScorecard`
+### `EvaluationCriterion`
 
 ```rust
-pub struct JudgeScorecard {
-    pub judge_id: String,       // e.g., "Judge-Alpha"
-    pub approved: bool,         // Binary consensus vote
-    pub logic_score: u8,        // 1-10 logical rigor rating
-    pub clarity_score: u8,      // 1-10 prose and structuring rating
-    pub critique: String,       // Detailed qualitative feedback
+pub struct EvaluationCriterion {
+    pub name: String,       // e.g., "Judge-Alpha"
+    pub weight: f64,        // Contribution weight (weights across criteria sum to 1.0)
+    pub score: f64,         // Normalized score between 0.0 and 1.0
+    pub rationale: String,  // Qualitative justification
+}
+```
+
+### `NodeScorecard`
+
+```rust
+pub struct NodeScorecard {
+    pub criteria: Vec<EvaluationCriterion>,
+    pub passing_threshold: f64,
 }
 
+impl NodeScorecard {
+    pub fn add_criterion(&mut self, name: &str, weight: f64, score: f64, rationale: &str);
+    pub fn composite_score(&self) -> f64; // weighted sum of all criteria
+    pub fn is_approved(&self) -> bool;    // composite_score() >= passing_threshold
+}
 ```
 
 ---
@@ -55,27 +68,35 @@ pub struct JudgeScorecard {
 
 ```rust
 use eontree_core::DecisionNode;
-use eontree_jury::{GlobalSentinel, LLMJudgeClient};
+use eontree_jury::LLMJudgeClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node: DecisionNode = /* ... load or receive proposed node ... */;
 
-    // 1. Run Global Sentinel ethical pre-filter
-    GlobalSentinel::evaluate(&node)?;
+    // 1. Run the Global Sentinel ethical pre-filter first (hard invariant, binary).
+    // GlobalSentinel::evaluate(&store, &root_axiom_id, &node)?;
 
-    // 2. Initialize Triple-LLM jury client with three independent endpoints
+    // 2. Initialize the jury client with three independent endpoints
     let jury = LLMJudgeClient::new([
         "https://api.judge-alpha.eontree.org/v1/eval".into(),
         "https://api.judge-beta.eontree.org/v1/eval".into(),
         "https://api.judge-gamma.eontree.org/v1/eval".into(),
     ]);
 
-    // 3. Execute parallel audit and verify 2/3 consensus
-    let scorecards = jury.audit_node(&node).await?;
-    
-    println!("Consensus achieved! Received {} valid scorecards.", scorecards.len());
+    // 3. Execute the parallel audit and collect a weighted scorecard
+    let scorecard = jury.evaluate_node_weighted(&node).await?;
+
+    if scorecard.is_approved() {
+        println!("Approved! Composite score: {:.2}", scorecard.composite_score());
+    } else {
+        println!(
+            "Rejected. Composite score {:.2} is below threshold {:.2}",
+            scorecard.composite_score(),
+            scorecard.passing_threshold
+        );
+    }
+
     Ok(())
 }
-
 ```

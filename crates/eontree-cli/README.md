@@ -43,7 +43,7 @@ cargo run --bin eontree-cli -- create \
 
 ## 3. Submit to the API Server (`submit`)
 
-Reads a signed node JSON file and dispatches a `POST /nodes` request to your local or remote `eontree-api` server. The server will run the Global Sentinel ethical pre-filter and the Triple-LLM jury audit before committing the record.
+Reads a signed node JSON file and dispatches a `POST /nodes` request to your local or remote `eontree-api` server. The server will run the Global Sentinel ethical pre-filter and the weighted Triple-LLM jury audit before committing the record.
 
 ```bash
 cargo run --bin eontree-cli -- submit \
@@ -53,4 +53,4 @@ cargo run --bin eontree-cli -- submit \
 ```
 
 * **Success:** Returns `201 Created` upon passing all validation checks and being written to the persistent `redb` store.
-* **Rejection:** Returns `422 Unprocessable Entity` if flagged by the Sentinel or if LLM consensus fails.
+* **Rejection:** Returns `422 Unprocessable Entity` if flagged by the Sentinel, or if the weighted jury score falls below the node's passing threshold (the response body includes the `NodeScorecard` for review).

@@ -2,10 +2,11 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use eontree_core::{DecisionNode, GraphStore, NodeId, store::RedbStore};
-use eontree_jury::{GlobalSentinel, LLMJudgeClient};
+use eontree_jury::{GlobalSentinel, LLMJudgeClient, NodeScorecard};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -72,29 +73,60 @@ async fn get_children_handler(
     }
 }
 
+// Rejection outcomes for node ingestion. Signature and Sentinel failures remain
+// strictly binary hard invariants; JuryRejected carries the graded scorecard that
+// produced the rejection so callers can audit exactly which criteria fell short.
+#[derive(Debug)]
+enum PostNodeError {
+    InvalidSignature,
+    PolicyViolation,
+    JuryRejected(NodeScorecard),
+    Internal,
+}
+
+impl IntoResponse for PostNodeError {
+    fn into_response(self) -> Response {
+        match self {
+            PostNodeError::InvalidSignature => StatusCode::BAD_REQUEST.into_response(),
+            PostNodeError::PolicyViolation => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+            PostNodeError::JuryRejected(scorecard) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(scorecard)).into_response()
+            }
+            PostNodeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    }
+}
+
 async fn post_node_handler(
     State(state): State<Arc<AppState>>,
     Json(node): Json<DecisionNode>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, PostNodeError> {
+    // Hard invariant 1: cryptographic signature must be valid.
     if node.verify().is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(PostNodeError::InvalidSignature);
     }
 
     let mut store = state.store.lock().await;
 
-    // 1. Run Global Sentinel ethical pre-filter
+    // Hard invariant 2: Global Sentinel ethical pre-filter must pass.
     if GlobalSentinel::evaluate(&*store, &state.root_axiom_id, &node).is_err() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(PostNodeError::PolicyViolation);
     }
 
-    // 2. Execute Triple-LLM jury consensus audit
-    if state.jury.audit_node(&node).await.is_err() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    // Weighted epistemic audit: graded merit scoring replaces binary jury consensus.
+    let scorecard = state
+        .jury
+        .evaluate_node_weighted(&node)
+        .await
+        .map_err(|_| PostNodeError::Internal)?;
+
+    if !scorecard.is_approved() {
+        return Err(PostNodeError::JuryRejected(scorecard));
     }
 
-    // 3. Commit to persistent store via trait method
+    // Persist only once every gate has passed.
     if store.put_node(&node).is_err() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        return Err(PostNodeError::Internal);
     }
 
     Ok(StatusCode::CREATED)
@@ -154,7 +186,7 @@ mod tests {
         let node = signed_node(&test_key(), None, "Root Node");
 
         let post_result = post_node_handler(State(state.clone()), Json(node.clone())).await;
-        assert_eq!(post_result.unwrap(), StatusCode::CREATED);
+        assert!(matches!(post_result, Ok(StatusCode::CREATED)));
 
         let fetched = get_node_handler(State(state), Path(node.id.0.clone()))
             .await
@@ -170,7 +202,7 @@ mod tests {
 
         let result = post_node_handler(State(state), Json(node)).await;
 
-        assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
+        assert!(matches!(result, Err(PostNodeError::InvalidSignature)));
     }
 
     #[tokio::test]

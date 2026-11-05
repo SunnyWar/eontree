@@ -1,4 +1,4 @@
-use eontree_core::DecisionNode;
+use eontree_core::{DecisionNode, NodeType};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -11,17 +11,70 @@ pub enum JuryError {
     Http(#[from] reqwest::Error),
     #[error("JSON parsing error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("Consensus failed: only {approved_count}/3 judges approved (Required: >= 2)")]
-    ConsensusFailed { approved_count: usize },
 }
 
+// A single weighted dimension of a graded epistemic evaluation for a node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluationCriterion {
+    pub name: String,
+    pub weight: f64,
+    pub score: f64,
+    pub rationale: String,
+}
+
+// A graded-merit evaluation of a node, replacing rigid binary pass/fail judging.
+// composite_score is the weight-normalized sum of all criteria; a node is
+// approved only if that composite meets or exceeds passing_threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeScorecard {
+    pub criteria: Vec<EvaluationCriterion>,
+    pub passing_threshold: f64,
+}
+
+impl NodeScorecard {
+    pub fn new(passing_threshold: f64) -> Self {
+        Self {
+            criteria: Vec::new(),
+            passing_threshold,
+        }
+    }
+
+    pub fn add_criterion(&mut self, name: &str, weight: f64, score: f64, rationale: &str) {
+        self.criteria.push(EvaluationCriterion {
+            name: name.to_string(),
+            weight,
+            score,
+            rationale: rationale.to_string(),
+        });
+    }
+
+    pub fn composite_score(&self) -> f64 {
+        self.criteria.iter().map(|c| c.weight * c.score).sum()
+    }
+
+    pub fn is_approved(&self) -> bool {
+        self.composite_score() >= self.passing_threshold
+    }
+}
+
+// The minimum composite score required for a node to be approved, scaled by how
+// foundational or safety-critical its type is: axioms and barriers are held to a
+// higher bar than exploratory Unknown nodes.
+fn default_passing_threshold(node_type: NodeType) -> f64 {
+    match node_type {
+        NodeType::Root | NodeType::Barrier => 0.9,
+        NodeType::Problem | NodeType::Innovation => 0.75,
+        NodeType::Unknown => 0.6,
+    }
+}
+
+// Raw per-judge opinion prior to being folded into a weighted NodeScorecard.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct JudgeScorecard {
-    pub judge_id: String,
-    pub approved: bool,
-    pub logic_score: u8, // 1-10
-    pub clarity_score: u8,
-    pub critique: String,
+struct JudgeOpinion {
+    judge_id: String,
+    logic_score: u8, // 1-10
+    clarity_score: u8,
+    critique: String,
 }
 
 pub struct LLMJudgeClient {
@@ -41,30 +94,36 @@ impl LLMJudgeClient {
         }
     }
 
-    /// Audits a node in parallel across all three independent LLM judges.
-    pub async fn audit_node(&self, node: &DecisionNode) -> Result<Vec<JudgeScorecard>, JuryError> {
+    // Audits a node in parallel across all three independent LLM judges and folds
+    // their opinions into a single weighted NodeScorecard. Each judge contributes
+    // an equally-weighted criterion derived from the average of its logic and
+    // clarity scores; the passing threshold is scaled by the node type.
+    pub async fn evaluate_node_weighted(
+        &self,
+        node: &DecisionNode,
+    ) -> Result<NodeScorecard, JuryError> {
         let fut1 = self.query_judge(&self.endpoint_urls[0], "Judge-Alpha", node);
         let fut2 = self.query_judge(&self.endpoint_urls[1], "Judge-Beta", node);
         let fut3 = self.query_judge(&self.endpoint_urls[2], "Judge-Gamma", node);
 
         let (res1, res2, res3) = tokio::join!(fut1, fut2, fut3);
+        let opinions = [res1?, res2?, res3?];
 
-        let scorecards = vec![res1?, res2?, res3?];
-
-        let approved_count = scorecards.iter().filter(|s| s.approved).count();
-        if approved_count < 2 {
-            return Err(JuryError::ConsensusFailed { approved_count });
+        let mut scorecard = NodeScorecard::new(default_passing_threshold(node.node_type));
+        let weight = 1.0 / opinions.len() as f64;
+        for opinion in &opinions {
+            let score = (opinion.logic_score as f64 + opinion.clarity_score as f64) / 20.0;
+            scorecard.add_criterion(&opinion.judge_id, weight, score, &opinion.critique);
         }
 
-        Ok(scorecards)
+        Ok(scorecard)
     }
-
     async fn query_judge(
         &self,
         endpoint: &str,
         judge_id: &str,
         node: &DecisionNode,
-    ) -> Result<JudgeScorecard, JuryError> {
+    ) -> Result<JudgeOpinion, JuryError> {
         // Construct prompt payload for the LLM judge
         let payload = serde_json::json!({
             "model": "eontree-validator-v1",
@@ -81,29 +140,26 @@ impl LLMJudgeClient {
         });
 
         // Uncomment when wiring up to active local/remote inference endpoints:
-        // let resp = self.client.post(endpoint).json(&payload).send().await?.json::<JudgeScorecard>().await?;
+        // let resp = self.client.post(endpoint).json(&payload).send().await?.json::<JudgeOpinion>().await?;
         // Ok(resp)
 
         // Mock return for compilation scaffolding:
-        Ok(JudgeScorecard {
+        Ok(JudgeOpinion {
             judge_id: judge_id.to_string(),
-            approved: true,
             logic_score: 9,
             clarity_score: 10,
             critique: "Sound first-principles reasoning with verifiable evidence framing.".into(),
         })
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eontree_core::NodeType;
 
-    fn sample_node() -> DecisionNode {
+    fn sample_node(node_type: NodeType) -> DecisionNode {
         DecisionNode::new(
             None,
-            NodeType::Innovation,
+            node_type,
             "Title".into(),
             "Content".into(),
             vec![],
@@ -132,28 +188,72 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn audit_node_returns_a_scorecard_per_judge() {
-        let node = sample_node();
+    #[test]
+    fn composite_score_is_weighted_sum() {
+        let mut scorecard = NodeScorecard::new(0.75);
+        scorecard.add_criterion("Logic", 0.6, 0.9, "Sound reasoning");
+        scorecard.add_criterion("Evidence", 0.4, 0.5, "Weak citations");
 
-        let scorecards = client()
-            .audit_node(&node)
-            .await
-            .expect("mock judges should approve");
-
-        assert_eq!(scorecards.len(), 3);
-        assert!(scorecards.iter().all(|s| s.approved));
-        assert_eq!(scorecards[0].judge_id, "Judge-Alpha");
-        assert_eq!(scorecards[1].judge_id, "Judge-Beta");
-        assert_eq!(scorecards[2].judge_id, "Judge-Gamma");
+        let expected = 0.6 * 0.9 + 0.4 * 0.5;
+        assert!((scorecard.composite_score() - expected).abs() < 1e-9);
     }
 
     #[test]
-    fn consensus_failed_error_formats_approved_count() {
-        let err = JuryError::ConsensusFailed { approved_count: 1 };
-        assert_eq!(
-            err.to_string(),
-            "Consensus failed: only 1/3 judges approved (Required: >= 2)"
+    fn is_approved_respects_passing_threshold() {
+        let mut scorecard = NodeScorecard::new(0.8);
+        scorecard.add_criterion("Only", 1.0, 0.79, "Just short");
+        assert!(!scorecard.is_approved());
+
+        scorecard.criteria[0].score = 0.8;
+        assert!(scorecard.is_approved());
+    }
+
+    #[test]
+    fn passing_threshold_scales_with_node_criticality() {
+        assert!(
+            default_passing_threshold(NodeType::Root)
+                > default_passing_threshold(NodeType::Problem)
         );
+        assert!(
+            default_passing_threshold(NodeType::Barrier)
+                > default_passing_threshold(NodeType::Innovation)
+        );
+        assert!(
+            default_passing_threshold(NodeType::Unknown)
+                < default_passing_threshold(NodeType::Problem)
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_node_weighted_returns_scorecard_with_one_criterion_per_judge() {
+        let node = sample_node(NodeType::Innovation);
+
+        let scorecard = client()
+            .evaluate_node_weighted(&node)
+            .await
+            .expect("mock judges should respond");
+
+        assert_eq!(scorecard.criteria.len(), 3);
+        assert_eq!(scorecard.criteria[0].name, "Judge-Alpha");
+        assert_eq!(scorecard.criteria[1].name, "Judge-Beta");
+        assert_eq!(scorecard.criteria[2].name, "Judge-Gamma");
+        assert!((scorecard.criteria.iter().map(|c| c.weight).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(
+            scorecard.passing_threshold,
+            default_passing_threshold(NodeType::Innovation)
+        );
+        assert!(scorecard.is_approved());
+    }
+
+    #[tokio::test]
+    async fn evaluate_node_weighted_uses_higher_threshold_for_root_nodes() {
+        let node = sample_node(NodeType::Root);
+
+        let scorecard = client()
+            .evaluate_node_weighted(&node)
+            .await
+            .expect("mock judges should respond");
+
+        assert_eq!(scorecard.passing_threshold, 0.9);
     }
 }
