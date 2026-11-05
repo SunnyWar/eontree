@@ -6,9 +6,9 @@
 
 ---
 
-## Commands & Usage
+# Commands & Usage
 
-### 1. Generate Cryptographic Keypairs (`keygen`)
+## 1. Generate Cryptographic Keypairs (`keygen`)
 
 Generates Ed25519 public and private key files used to sign authored nodes and prove author provenance.
 
@@ -21,7 +21,7 @@ cargo run --bin eontree-cli -- keygen --output my_key
 
 ---
 
-### 2. Author and Sign a Decision Node (`create`)
+## 2. Author and Sign a Decision Node (`create`)
 
 Drafts a new `DecisionNode`, automatically computes its unique content-addressable Blake3 hash (`NodeId`), attaches evidence references, and serializes the signed payload to disk.
 
@@ -41,7 +41,7 @@ cargo run --bin eontree-cli -- create \
 
 ---
 
-### 3. Submit to the API Server (`submit`)
+## 3. Submit to the API Server (`submit`)
 
 Reads a signed node JSON file and dispatches a `POST /nodes` request to your local or remote `eontree-api` server. The server will run the Global Sentinel ethical pre-filter and the Triple-LLM jury audit before committing the record.
 

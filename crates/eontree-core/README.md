@@ -6,7 +6,7 @@
 
 ---
 
-## Core Architecture
+# Core Architecture
 
 To guarantee absolute data integrity, auditability, and tamper-resistance across a decentralized, community-editable platform, `eontree-core` enforces strict design principles:
 

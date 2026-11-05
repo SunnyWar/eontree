@@ -6,7 +6,7 @@
 
 ---
 
-## Core Architecture & State Management
+# Core Architecture & State Management
 
 The API server runs on a shared state container (`AppState`) wrapped for thread-safe concurrent access across asynchronous request handlers:
 
@@ -38,7 +38,5 @@ The API server runs on a shared state container (`AppState`) wrapped for thread-
 * `201 Created` with consensus metadata upon successful commit.
 * `400 Bad Request` if cryptographic verification fails.
 * `422 Unprocessable Entity` if rejected by the Global Sentinel or if the 2/3 LLM consensus fails.
-
-
 
 ---
