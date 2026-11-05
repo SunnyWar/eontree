@@ -128,7 +128,7 @@ impl DecisionNode {
 
 /// Graph storage abstraction trait for database backends (e.g., SQLite / sled / Redb).
 pub trait GraphStore {
-    type Error;
+    type Error: std::fmt::Display;
 
     fn get_node(&self, id: &NodeId) -> Result<Option<DecisionNode>, Self::Error>;
     fn put_node(&mut self, node: &DecisionNode) -> Result<(), Self::Error>;
