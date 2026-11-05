@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
 
-members = ["crates/eontree-api", "crates/eontree-cli","crates/eontree-core"
-	, "crates/eontree-jury"]
+members = [
+    "crates/eontree-core",
+    "crates/eontree-jury",
+    "crates/eontree-api",
+    "crates/eontree-cli"
+]

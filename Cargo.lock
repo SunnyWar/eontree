@@ -361,6 +361,7 @@ dependencies = [
  "eontree-core",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
