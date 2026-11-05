@@ -77,6 +77,54 @@ pub struct DecisionNode {
 }
 
 impl DecisionNode {
+    /// Creates a new decision node, automatically computing its Blake3 content-addressable hash.
+    pub fn new(
+        parent_id: Option<NodeId>,
+        node_type: NodeType,
+        title: String,
+        content: String,
+        evidence_refs: Vec<String>,
+        author_pubkey: String,
+    ) -> Self {
+        let created_at = chrono::Utc::now();
+
+        // Convert parent_id to string for canonical hashing
+        let parent_str = parent_id
+            .as_ref()
+            .map(|p| p.0.clone())
+            .unwrap_or_else(|| "ROOT".into());
+
+        // Construct a canonical payload string for content-addressable hashing
+        let raw_payload = format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            parent_str,
+            serde_json::to_string(&node_type).unwrap_or_default(),
+            title,
+            content,
+            evidence_refs.join(","),
+            author_pubkey,
+            created_at.timestamp()
+        );
+
+        // Compute Blake3 hash for the unique NodeId
+        let hash = blake3::hash(raw_payload.as_bytes());
+        let id = NodeId(hash.to_hex().to_string());
+
+        Self {
+            id,
+            parent_id,
+            node_type,
+            title,
+            content,
+            evidence_refs,
+            author_pubkey,
+            author_signature: "placeholder_signature".into(), // Populated by signing
+            created_at,
+        }
+    }
+}
+
+impl DecisionNode {
     /// Verifies the structural integrity and cryptographic signature of the node.
     pub fn verify(&self) -> Result<(), CoreError> {
         // 1. Verify content-addressable ID
