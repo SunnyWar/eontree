@@ -41,3 +41,124 @@ impl GlobalSentinel {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeStore {
+        children: Vec<DecisionNode>,
+        fail: bool,
+    }
+
+    impl GraphStore for FakeStore {
+        type Error = String;
+
+        fn get_node(&self, _id: &NodeId) -> Result<Option<DecisionNode>, Self::Error> {
+            unimplemented!("not exercised by GlobalSentinel::evaluate")
+        }
+
+        fn put_node(&mut self, _node: &DecisionNode) -> Result<(), Self::Error> {
+            unimplemented!("not exercised by GlobalSentinel::evaluate")
+        }
+
+        fn get_children(&self, _id: &NodeId) -> Result<Vec<DecisionNode>, Self::Error> {
+            if self.fail {
+                Err("store unavailable".to_string())
+            } else {
+                Ok(self.children.clone())
+            }
+        }
+    }
+
+    fn constraint(node_type: NodeType, title: &str, content: &str) -> DecisionNode {
+        DecisionNode::new(
+            None,
+            node_type,
+            title.into(),
+            content.into(),
+            vec![],
+            "author".into(),
+        )
+    }
+
+    fn candidate(title: &str, content: &str) -> DecisionNode {
+        DecisionNode::new(
+            None,
+            NodeType::Innovation,
+            title.into(),
+            content.into(),
+            vec![],
+            "author".into(),
+        )
+    }
+
+    #[test]
+    fn evaluate_allows_node_with_no_constraints() {
+        let store = FakeStore {
+            children: vec![],
+            fail: false,
+        };
+        let root = NodeId("root".into());
+        let node = candidate("New idea", "Something harmless");
+
+        assert!(GlobalSentinel::evaluate(&store, &root, &node).is_ok());
+    }
+
+    #[test]
+    fn evaluate_rejects_node_whose_content_matches_problem_constraint() {
+        let store = FakeStore {
+            children: vec![constraint(
+                NodeType::Problem,
+                "Banned topic",
+                "forbidden phrase",
+            )],
+            fail: false,
+        };
+        let root = NodeId("root".into());
+        let node = candidate("Some title", "This contains a forbidden phrase indeed");
+
+        let err = GlobalSentinel::evaluate(&store, &root, &node).unwrap_err();
+        assert!(matches!(err, SentinelError::ConstraintViolation(_)));
+    }
+
+    #[test]
+    fn evaluate_rejects_node_whose_title_matches_root_constraint() {
+        let store = FakeStore {
+            children: vec![constraint(NodeType::Root, "root constraint", "blockme")],
+            fail: false,
+        };
+        let root = NodeId("root".into());
+        let node = candidate("this should blockme please", "irrelevant content");
+
+        assert!(GlobalSentinel::evaluate(&store, &root, &node).is_err());
+    }
+
+    #[test]
+    fn evaluate_ignores_constraints_of_other_node_types() {
+        let store = FakeStore {
+            children: vec![constraint(NodeType::Barrier, "irrelevant", "forbidden")],
+            fail: false,
+        };
+        let root = NodeId("root".into());
+        let node = candidate(
+            "Some title",
+            "this contains forbidden word but type is Barrier",
+        );
+
+        assert!(GlobalSentinel::evaluate(&store, &root, &node).is_ok());
+    }
+
+    #[test]
+    fn evaluate_propagates_store_errors() {
+        let store = FakeStore {
+            children: vec![],
+            fail: true,
+        };
+        let root = NodeId("root".into());
+        let node = candidate("title", "content");
+
+        let err = GlobalSentinel::evaluate(&store, &root, &node).unwrap_err();
+        assert!(matches!(err, SentinelError::Store(_)));
+    }
+}

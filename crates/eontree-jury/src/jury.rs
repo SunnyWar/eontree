@@ -94,3 +94,66 @@ impl LLMJudgeClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eontree_core::NodeType;
+
+    fn sample_node() -> DecisionNode {
+        DecisionNode::new(
+            None,
+            NodeType::Innovation,
+            "Title".into(),
+            "Content".into(),
+            vec![],
+            "author".into(),
+        )
+    }
+
+    fn client() -> LLMJudgeClient {
+        LLMJudgeClient::new([
+            "http://judge-alpha.invalid".into(),
+            "http://judge-beta.invalid".into(),
+            "http://judge-gamma.invalid".into(),
+        ])
+    }
+
+    #[test]
+    fn new_stores_all_three_endpoints() {
+        let client = client();
+        assert_eq!(
+            client.endpoint_urls,
+            [
+                "http://judge-alpha.invalid".to_string(),
+                "http://judge-beta.invalid".to_string(),
+                "http://judge-gamma.invalid".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_node_returns_a_scorecard_per_judge() {
+        let node = sample_node();
+
+        let scorecards = client()
+            .audit_node(&node)
+            .await
+            .expect("mock judges should approve");
+
+        assert_eq!(scorecards.len(), 3);
+        assert!(scorecards.iter().all(|s| s.approved));
+        assert_eq!(scorecards[0].judge_id, "Judge-Alpha");
+        assert_eq!(scorecards[1].judge_id, "Judge-Beta");
+        assert_eq!(scorecards[2].judge_id, "Judge-Gamma");
+    }
+
+    #[test]
+    fn consensus_failed_error_formats_approved_count() {
+        let err = JuryError::ConsensusFailed { approved_count: 1 };
+        assert_eq!(
+            err.to_string(),
+            "Consensus failed: only 1/3 judges approved (Required: >= 2)"
+        );
+    }
+}

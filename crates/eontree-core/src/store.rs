@@ -89,3 +89,95 @@ impl GraphStore for RedbStore {
         Ok(child_nodes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NodeType;
+    use ed25519_dalek::SigningKey;
+    use tempfile::TempDir;
+
+    fn test_key() -> SigningKey {
+        SigningKey::from_bytes(&[3u8; 32])
+    }
+
+    fn signed_node(key: &SigningKey, parent_id: Option<NodeId>, title: &str) -> DecisionNode {
+        let author_pubkey = hex::encode(key.verifying_key().to_bytes());
+        let mut node = DecisionNode::new(
+            parent_id,
+            NodeType::Problem,
+            title.into(),
+            "content".into(),
+            vec![],
+            author_pubkey,
+        );
+        node.sign(key);
+        node
+    }
+
+    fn open_temp_store() -> (RedbStore, TempDir) {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let store = RedbStore::open(dir.path().join("test.redb")).expect("failed to open store");
+        (store, dir)
+    }
+
+    #[test]
+    fn put_and_get_node_round_trip() {
+        let (mut store, _dir) = open_temp_store();
+        let node = signed_node(&test_key(), None, "Root");
+
+        store.put_node(&node).expect("put_node should succeed");
+
+        let fetched = store
+            .get_node(&node.id)
+            .expect("get_node should succeed")
+            .expect("node should exist");
+        assert_eq!(fetched.id, node.id);
+        assert_eq!(fetched.title, "Root");
+    }
+
+    #[test]
+    fn get_node_missing_returns_none() {
+        let (store, _dir) = open_temp_store();
+        let missing = NodeId("does-not-exist".into());
+        assert!(store.get_node(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn put_node_rejects_invalid_signature() {
+        let (mut store, _dir) = open_temp_store();
+        let mut node = signed_node(&test_key(), None, "Root");
+        node.content = "tampered".into();
+
+        let err = store.put_node(&node).unwrap_err();
+        assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn get_children_returns_only_direct_children() {
+        let (mut store, _dir) = open_temp_store();
+        let key = test_key();
+
+        let parent = signed_node(&key, None, "Parent");
+        store.put_node(&parent).unwrap();
+
+        let child = signed_node(&key, Some(parent.id.clone()), "Child");
+        store.put_node(&child).unwrap();
+
+        let unrelated = signed_node(&key, None, "Unrelated");
+        store.put_node(&unrelated).unwrap();
+
+        let children = store.get_children(&parent.id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, child.id);
+    }
+
+    #[test]
+    fn get_children_returns_empty_vec_for_childless_node() {
+        let (mut store, _dir) = open_temp_store();
+        let node = signed_node(&test_key(), None, "Lonely");
+        store.put_node(&node).unwrap();
+
+        assert!(store.get_children(&node.id).unwrap().is_empty());
+    }
+}

@@ -156,3 +156,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_keygen_with_default_output() {
+        let cli = Cli::try_parse_from(["eontree", "keygen"]).unwrap();
+        match cli.command {
+            Commands::Keygen { output } => assert_eq!(output, "eontree_key"),
+            _ => panic!("expected Keygen command"),
+        }
+    }
+
+    #[test]
+    fn parses_keygen_with_custom_output() {
+        let cli = Cli::try_parse_from(["eontree", "keygen", "--output", "mykey"]).unwrap();
+        match cli.command {
+            Commands::Keygen { output } => assert_eq!(output, "mykey"),
+            _ => panic!("expected Keygen command"),
+        }
+    }
+
+    #[test]
+    fn parses_create_with_required_args_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "eontree",
+            "create",
+            "--title",
+            "T",
+            "--content",
+            "C",
+            "--parent-id",
+            "none",
+            "--key-file",
+            "key.priv",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Create {
+                title,
+                content,
+                node_type,
+                parent_id,
+                key_file,
+                output,
+            } => {
+                assert_eq!(title, "T");
+                assert_eq!(content, "C");
+                assert_eq!(node_type, "problem");
+                assert_eq!(parent_id, "none");
+                assert_eq!(key_file, PathBuf::from("key.priv"));
+                assert_eq!(output, PathBuf::from("node.json"));
+            }
+            _ => panic!("expected Create command"),
+        }
+    }
+
+    #[test]
+    fn create_missing_required_args_fails_to_parse() {
+        let result = Cli::try_parse_from(["eontree", "create", "--title", "T"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_submit_with_defaults() {
+        let cli = Cli::try_parse_from(["eontree", "submit"]).unwrap();
+        match cli.command {
+            Commands::Submit { input, endpoint } => {
+                assert_eq!(input, PathBuf::from("node.json"));
+                assert_eq!(endpoint, "http://127.0.0.1:8080");
+            }
+            _ => panic!("expected Submit command"),
+        }
+    }
+
+    #[test]
+    fn parses_submit_with_custom_endpoint() {
+        let cli =
+            Cli::try_parse_from(["eontree", "submit", "--endpoint", "http://example.com"]).unwrap();
+        match cli.command {
+            Commands::Submit { endpoint, .. } => assert_eq!(endpoint, "http://example.com"),
+            _ => panic!("expected Submit command"),
+        }
+    }
+}
