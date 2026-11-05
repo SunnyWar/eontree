@@ -161,10 +161,19 @@ mod tests {
     }
 
     fn signed_node(key: &SigningKey, parent_id: Option<NodeId>, title: &str) -> DecisionNode {
+        signed_node_with_type(key, parent_id, NodeType::Innovation, title)
+    }
+
+    fn signed_node_with_type(
+        key: &SigningKey,
+        parent_id: Option<NodeId>,
+        node_type: NodeType,
+        title: &str,
+    ) -> DecisionNode {
         let author_pubkey = hex::encode(key.verifying_key().to_bytes());
         let mut node = DecisionNode::new(
             parent_id,
-            eontree_core::NodeType::Innovation,
+            node_type,
             title.into(),
             "content".into(),
             vec![],
@@ -228,19 +237,18 @@ mod tests {
         let (state, _dir) = test_state();
         let key = test_key();
 
-        // Create a Root node as the parent
-        let mut parent = signed_node(&key, None, "Parent");
-        parent.node_type = NodeType::Root;
-        // Re-sign or update hash if your test helper requires it, or construct it directly:
-        // (Assuming signed_node allows setting type or you can adjust field directly)
+        // Create a Problem node as the parent (Root/Barrier require a stricter
+        // 0.9 jury threshold that the mock judge scaffolding intentionally
+        // doesn't clear, so Problem->Problem decomposition is used here instead).
+        let parent = signed_node_with_type(&key, None, NodeType::Problem, "Parent");
 
         post_node_handler(State(state.clone()), Json(parent.clone()))
             .await
             .unwrap();
 
-        // Create a Problem child under the Root parent (or Problem -> Problem sub-problem)
-        let mut child = signed_node(&key, Some(parent.id.clone()), "Child");
-        child.node_type = NodeType::Problem;
+        // Create a Problem sub-problem under the parent
+        let child =
+            signed_node_with_type(&key, Some(parent.id.clone()), NodeType::Problem, "Child");
 
         post_node_handler(State(state.clone()), Json(child.clone()))
             .await

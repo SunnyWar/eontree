@@ -2,6 +2,7 @@ use eontree_core::{DecisionNode, NodeType};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -13,43 +14,108 @@ pub enum JuryError {
     Json(#[from] serde_json::Error),
 }
 
-// A single weighted dimension of a graded epistemic evaluation for a node.
+// A six-dimensional epistemic quality signal for a node. Each dimension is a raw
+// score intended to fall within [0.0, 1.0]; composite_score clamps defensively in
+// case an upstream judge returns an out-of-range value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NodeMetrics {
+    pub plausibility: f32,
+    pub evidence_strength: f32,
+    pub predictive_power: f32,
+    pub novelty: f32,
+    pub explanatory_power: f32,
+    pub solution_relevance: f32,
+}
+
+impl NodeMetrics {
+    fn weighted_pairs(&self, weights: &MetricWeights) -> [(f32, f32); 6] {
+        [
+            (self.plausibility, weights.plausibility),
+            (self.evidence_strength, weights.evidence_strength),
+            (self.predictive_power, weights.predictive_power),
+            (self.novelty, weights.novelty),
+            (self.explanatory_power, weights.explanatory_power),
+            (self.solution_relevance, weights.solution_relevance),
+        ]
+    }
+}
+
+fn average_metrics(samples: &[NodeMetrics]) -> NodeMetrics {
+    let n = samples.len() as f32;
+    NodeMetrics {
+        plausibility: samples.iter().map(|m| m.plausibility).sum::<f32>() / n,
+        evidence_strength: samples.iter().map(|m| m.evidence_strength).sum::<f32>() / n,
+        predictive_power: samples.iter().map(|m| m.predictive_power).sum::<f32>() / n,
+        novelty: samples.iter().map(|m| m.novelty).sum::<f32>() / n,
+        explanatory_power: samples.iter().map(|m| m.explanatory_power).sum::<f32>() / n,
+        solution_relevance: samples.iter().map(|m| m.solution_relevance).sum::<f32>() / n,
+    }
+}
+
+// Per-dimension contribution weights used when folding NodeMetrics into a single
+// composite score. The Default baseline sums to 1.0, but composite_score
+// normalizes against the actual total so custom weightings need not sum exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluationCriterion {
-    pub name: String,
-    pub weight: f64,
-    pub score: f64,
-    pub rationale: String,
+pub struct MetricWeights {
+    pub plausibility: f32,
+    pub evidence_strength: f32,
+    pub predictive_power: f32,
+    pub novelty: f32,
+    pub explanatory_power: f32,
+    pub solution_relevance: f32,
+}
+
+impl Default for MetricWeights {
+    fn default() -> Self {
+        Self {
+            plausibility: 0.25,
+            evidence_strength: 0.25,
+            predictive_power: 0.15,
+            novelty: 0.1,
+            explanatory_power: 0.15,
+            solution_relevance: 0.1,
+        }
+    }
 }
 
 // A graded-merit evaluation of a node, replacing rigid binary pass/fail judging.
-// composite_score is the weight-normalized sum of all criteria; a node is
-// approved only if that composite meets or exceeds passing_threshold.
+// composite_score is the weight-normalized sum of all six metric dimensions; a
+// node is approved only if that composite meets or exceeds passing_threshold.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeScorecard {
-    pub criteria: Vec<EvaluationCriterion>,
-    pub passing_threshold: f64,
+    pub metrics: NodeMetrics,
+    pub weights: MetricWeights,
+    pub passing_threshold: f32,
+    pub rationales: HashMap<String, String>,
 }
 
 impl NodeScorecard {
-    pub fn new(passing_threshold: f64) -> Self {
+    pub fn new(metrics: NodeMetrics, weights: MetricWeights, passing_threshold: f32) -> Self {
         Self {
-            criteria: Vec::new(),
+            metrics,
+            weights,
             passing_threshold,
+            rationales: HashMap::new(),
         }
     }
 
-    pub fn add_criterion(&mut self, name: &str, weight: f64, score: f64, rationale: &str) {
-        self.criteria.push(EvaluationCriterion {
-            name: name.to_string(),
-            weight,
-            score,
-            rationale: rationale.to_string(),
-        });
+    pub fn add_rationale(&mut self, dimension: &str, rationale: &str) {
+        self.rationales
+            .insert(dimension.to_string(), rationale.to_string());
     }
 
-    pub fn composite_score(&self) -> f64 {
-        self.criteria.iter().map(|c| c.weight * c.score).sum()
+    pub fn composite_score(&self) -> f32 {
+        let pairs = self.metrics.weighted_pairs(&self.weights);
+        let total_weight: f32 = pairs.iter().map(|(_, w)| w).sum();
+        if total_weight <= 0.0 {
+            return 0.0;
+        }
+
+        let weighted_sum: f32 = pairs
+            .iter()
+            .map(|(score, w)| score.clamp(0.0, 1.0) * w)
+            .sum();
+        weighted_sum / total_weight
     }
 
     pub fn is_approved(&self) -> bool {
@@ -60,7 +126,7 @@ impl NodeScorecard {
 // The minimum composite score required for a node to be approved, scaled by how
 // foundational or safety-critical its type is: axioms and barriers are held to a
 // higher bar than exploratory Unknown nodes.
-fn default_passing_threshold(node_type: NodeType) -> f64 {
+fn default_passing_threshold(node_type: NodeType) -> f32 {
     match node_type {
         NodeType::Root | NodeType::Barrier => 0.9,
         NodeType::Problem | NodeType::Innovation => 0.75,
@@ -68,12 +134,11 @@ fn default_passing_threshold(node_type: NodeType) -> f64 {
     }
 }
 
-// Raw per-judge opinion prior to being folded into a weighted NodeScorecard.
+// Raw per-judge opinion prior to being folded into a NodeScorecard.
 #[derive(Debug, Serialize, Deserialize)]
 struct JudgeOpinion {
     judge_id: String,
-    logic_score: u8, // 1-10
-    clarity_score: u8,
+    metrics: NodeMetrics,
     critique: String,
 }
 
@@ -94,10 +159,10 @@ impl LLMJudgeClient {
         }
     }
 
-    // Audits a node in parallel across all three independent LLM judges and folds
-    // their opinions into a single weighted NodeScorecard. Each judge contributes
-    // an equally-weighted criterion derived from the average of its logic and
-    // clarity scores; the passing threshold is scaled by the node type.
+    // Audits a node in parallel across all three independent LLM judges, averages
+    // their six-dimensional metrics into a single NodeMetrics reading, and folds
+    // the result into a NodeScorecard using the default metric weights and a
+    // passing threshold scaled by the node type.
     pub async fn evaluate_node_weighted(
         &self,
         node: &DecisionNode,
@@ -109,15 +174,24 @@ impl LLMJudgeClient {
         let (res1, res2, res3) = tokio::join!(fut1, fut2, fut3);
         let opinions = [res1?, res2?, res3?];
 
-        let mut scorecard = NodeScorecard::new(default_passing_threshold(node.node_type));
-        let weight = 1.0 / opinions.len() as f64;
+        let metrics = average_metrics(&[
+            opinions[0].metrics,
+            opinions[1].metrics,
+            opinions[2].metrics,
+        ]);
+
+        let mut scorecard = NodeScorecard::new(
+            metrics,
+            MetricWeights::default(),
+            default_passing_threshold(node.node_type),
+        );
         for opinion in &opinions {
-            let score = (opinion.logic_score as f64 + opinion.clarity_score as f64) / 20.0;
-            scorecard.add_criterion(&opinion.judge_id, weight, score, &opinion.critique);
+            scorecard.add_rationale(&opinion.judge_id, &opinion.critique);
         }
 
         Ok(scorecard)
     }
+
     async fn query_judge(
         &self,
         endpoint: &str,
@@ -130,7 +204,7 @@ impl LLMJudgeClient {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a rigorous synthetic peer-review juror for EonTree. Evaluate the logical validity, evidence backing, and clarity of the proposed node."
+                    "content": "You are a rigorous synthetic peer-review juror for EonTree. Evaluate the plausibility, evidence strength, predictive power, novelty, explanatory power, and solution relevance of the proposed node."
                 },
                 {
                     "role": "user",
@@ -146,12 +220,19 @@ impl LLMJudgeClient {
         // Mock return for compilation scaffolding:
         Ok(JudgeOpinion {
             judge_id: judge_id.to_string(),
-            logic_score: 9,
-            clarity_score: 10,
+            metrics: NodeMetrics {
+                plausibility: 0.9,
+                evidence_strength: 0.85,
+                predictive_power: 0.8,
+                novelty: 0.7,
+                explanatory_power: 0.9,
+                solution_relevance: 0.85,
+            },
             critique: "Sound first-principles reasoning with verifiable evidence framing.".into(),
         })
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +256,17 @@ mod tests {
         ])
     }
 
+    fn uniform_metrics(value: f32) -> NodeMetrics {
+        NodeMetrics {
+            plausibility: value,
+            evidence_strength: value,
+            predictive_power: value,
+            novelty: value,
+            explanatory_power: value,
+            solution_relevance: value,
+        }
+    }
+
     #[test]
     fn new_stores_all_three_endpoints() {
         let client = client();
@@ -189,22 +281,64 @@ mod tests {
     }
 
     #[test]
-    fn composite_score_is_weighted_sum() {
-        let mut scorecard = NodeScorecard::new(0.75);
-        scorecard.add_criterion("Logic", 0.6, 0.9, "Sound reasoning");
-        scorecard.add_criterion("Evidence", 0.4, 0.5, "Weak citations");
+    fn default_metric_weights_sum_to_one() {
+        let w = MetricWeights::default();
+        let total = w.plausibility
+            + w.evidence_strength
+            + w.predictive_power
+            + w.novelty
+            + w.explanatory_power
+            + w.solution_relevance;
+        assert!((total - 1.0).abs() < 1e-6);
+    }
 
-        let expected = 0.6 * 0.9 + 0.4 * 0.5;
-        assert!((scorecard.composite_score() - expected).abs() < 1e-9);
+    #[test]
+    fn composite_score_is_weighted_average_across_all_dimensions() {
+        let metrics = NodeMetrics {
+            plausibility: 1.0,
+            evidence_strength: 0.5,
+            predictive_power: 1.0,
+            novelty: 0.0,
+            explanatory_power: 1.0,
+            solution_relevance: 0.5,
+        };
+        let weights = MetricWeights::default();
+        let scorecard = NodeScorecard::new(metrics, weights.clone(), 0.75);
+
+        let expected = (metrics.plausibility * weights.plausibility
+            + metrics.evidence_strength * weights.evidence_strength
+            + metrics.predictive_power * weights.predictive_power
+            + metrics.novelty * weights.novelty
+            + metrics.explanatory_power * weights.explanatory_power
+            + metrics.solution_relevance * weights.solution_relevance)
+            / 1.0;
+
+        assert!((scorecard.composite_score() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn composite_score_clamps_out_of_range_metrics() {
+        let metrics = NodeMetrics {
+            plausibility: 1.5,
+            evidence_strength: -0.5,
+            predictive_power: 0.5,
+            novelty: 0.5,
+            explanatory_power: 0.5,
+            solution_relevance: 0.5,
+        };
+        let scorecard = NodeScorecard::new(metrics, MetricWeights::default(), 0.5);
+
+        // All inputs clamp into [0.0, 1.0], so the composite must land there too.
+        let score = scorecard.composite_score();
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]
     fn is_approved_respects_passing_threshold() {
-        let mut scorecard = NodeScorecard::new(0.8);
-        scorecard.add_criterion("Only", 1.0, 0.79, "Just short");
+        let mut scorecard = NodeScorecard::new(uniform_metrics(0.5), MetricWeights::default(), 0.8);
         assert!(!scorecard.is_approved());
 
-        scorecard.criteria[0].score = 0.8;
+        scorecard.metrics = uniform_metrics(0.95);
         assert!(scorecard.is_approved());
     }
 
@@ -225,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evaluate_node_weighted_returns_scorecard_with_one_criterion_per_judge() {
+    async fn evaluate_node_weighted_returns_populated_scorecard() {
         let node = sample_node(NodeType::Innovation);
 
         let scorecard = client()
@@ -233,11 +367,10 @@ mod tests {
             .await
             .expect("mock judges should respond");
 
-        assert_eq!(scorecard.criteria.len(), 3);
-        assert_eq!(scorecard.criteria[0].name, "Judge-Alpha");
-        assert_eq!(scorecard.criteria[1].name, "Judge-Beta");
-        assert_eq!(scorecard.criteria[2].name, "Judge-Gamma");
-        assert!((scorecard.criteria.iter().map(|c| c.weight).sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(scorecard.rationales.len(), 3);
+        assert!(scorecard.rationales.contains_key("Judge-Alpha"));
+        assert!(scorecard.rationales.contains_key("Judge-Beta"));
+        assert!(scorecard.rationales.contains_key("Judge-Gamma"));
         assert_eq!(
             scorecard.passing_threshold,
             default_passing_threshold(NodeType::Innovation)

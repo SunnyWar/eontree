@@ -29,35 +29,54 @@ The Sentinel evaluates every incoming `DecisionNode` against EonTree's core non-
 Once a node passes the Sentinel pre-filter, it enters the graded-merit evaluation pipeline managed by `LLMJudgeClient`:
 
 * **Parallel Asynchronous Dispatch:** Utilizes `tokio` and `reqwest` to dispatch evaluation payloads simultaneously across three independent judge endpoints (`Judge-Alpha`, `Judge-Beta`, `Judge-Gamma`) using `tokio::join!`.
-* **Graded Merit Scoring:** Each judge contributes an equally-weighted `EvaluationCriterion` (derived from its logic and clarity ratings) instead of casting a binary approve/reject vote.
-* **Composite Threshold Check:** `LLMJudgeClient::evaluate_node_weighted` folds the three criteria into a single `NodeScorecard`. A node is approved only if its weighted composite score meets or exceeds `passing_threshold`, which scales with node criticality: `Root`/`Barrier` nodes require `0.9`, `Problem`/`Innovation` require `0.75`, and exploratory `Unknown` nodes require only `0.6`.
+* **Graded Merit Scoring:** Each judge rates the node across six independent epistemic dimensions (`NodeMetrics`): plausibility, evidence strength, predictive power, novelty, explanatory power, and solution relevance, instead of casting a binary approve/reject vote.
+* **Composite Threshold Check:** `LLMJudgeClient::evaluate_node_weighted` averages the three judges' `NodeMetrics` readings and folds the result into a `NodeScorecard` using configurable `MetricWeights`. A node is approved only if its weighted composite score meets or exceeds `passing_threshold`, which scales with node criticality: `Root`/`Barrier` nodes require `0.9`, `Problem`/`Innovation` require `0.75`, and exploratory `Unknown` nodes require only `0.6`.
 
 ---
 
 ## Data Structures
 
-### `EvaluationCriterion`
+### `NodeMetrics`
 
 ```rust
-pub struct EvaluationCriterion {
-    pub name: String,       // e.g., "Judge-Alpha"
-    pub weight: f64,        // Contribution weight (weights across criteria sum to 1.0)
-    pub score: f64,         // Normalized score between 0.0 and 1.0
-    pub rationale: String,  // Qualitative justification
+pub struct NodeMetrics {
+    pub plausibility: f32,
+    pub evidence_strength: f32,
+    pub predictive_power: f32,
+    pub novelty: f32,
+    pub explanatory_power: f32,
+    pub solution_relevance: f32,
 }
 ```
+
+### `MetricWeights`
+
+```rust
+pub struct MetricWeights {
+    pub plausibility: f32,
+    pub evidence_strength: f32,
+    pub predictive_power: f32,
+    pub novelty: f32,
+    pub explanatory_power: f32,
+    pub solution_relevance: f32,
+}
+```
+
+`MetricWeights::default()` provides a baseline weighting (summing to `1.0`) that favors plausibility and evidence strength.
 
 ### `NodeScorecard`
 
 ```rust
 pub struct NodeScorecard {
-    pub criteria: Vec<EvaluationCriterion>,
-    pub passing_threshold: f64,
+    pub metrics: NodeMetrics,
+    pub weights: MetricWeights,
+    pub passing_threshold: f32,
+    pub rationales: std::collections::HashMap<String, String>, // per-judge critique, keyed by judge ID
 }
 
 impl NodeScorecard {
-    pub fn add_criterion(&mut self, name: &str, weight: f64, score: f64, rationale: &str);
-    pub fn composite_score(&self) -> f64; // weighted sum of all criteria
+    pub fn add_rationale(&mut self, dimension: &str, rationale: &str);
+    pub fn composite_score(&self) -> f32; // weight-normalized sum across all six metric dimensions, clamped to [0.0, 1.0]
     pub fn is_approved(&self) -> bool;    // composite_score() >= passing_threshold
 }
 ```
