@@ -1,8 +1,9 @@
+
+pub mod store;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-pub mod store;
 
 #[derive(Error, Debug)]
 pub enum CoreError {
@@ -22,32 +23,6 @@ pub enum NodeType {
     Unknown,
     Barrier,
     Innovation,
-}
-
-/// Content-addressable identifier derived from a Blake3 hash of the node's immutable fields.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeId(pub String);
-
-impl NodeId {
-    /// Computes a deterministic content-addressable ID from node payload fields.
-    pub fn compute(
-        node_type: NodeType,
-        parent_id: Option<&NodeId>,
-        title: &str,
-        content: &str,
-        author_pubkey: &str,
-    ) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(format!("{:?}", node_type).as_bytes());
-        if let Some(pid) = parent_id {
-            hasher.update(pid.0.as_bytes());
-        }
-        hasher.update(title.as_bytes());
-        hasher.update(content.as_bytes());
-        hasher.update(author_pubkey.as_bytes());
-
-        Self(hasher.finalize().to_hex().to_string())
-    }
 }
 
 /// Relationship types between nodes in the decision tree.
@@ -72,7 +47,9 @@ pub enum NodeStatus {
     /// Automatically generated adversarial stub waiting for community critique.
     PendingOpposition,
 }
-
+/// Content-addressable identifier derived from a Blake3 hash of the node's immutable fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NodeId(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionNode {
     pub id: NodeId,
@@ -88,6 +65,28 @@ pub struct DecisionNode {
     /// IDs of adversarial counter-nodes (objections, failure modes, alternatives)
     /// automatically spawned alongside this node.
     pub counter_node_ids: Vec<NodeId>,
+}
+
+impl NodeId {
+    /// Computes a deterministic content-addressable ID from node payload fields.
+    pub fn compute(
+        node_type: NodeType,
+        parent_id: Option<&NodeId>,
+        title: &str,
+        content: &str,
+        author_pubkey: &str,
+    ) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(format!("{:?}", node_type).as_bytes());
+        if let Some(pid) = parent_id {
+            hasher.update(pid.0.as_bytes());
+        }
+        hasher.update(title.as_bytes());
+        hasher.update(content.as_bytes());
+        hasher.update(author_pubkey.as_bytes());
+
+        Self(hasher.finalize().to_hex().to_string())
+    }
 }
 
 impl DecisionNode {
@@ -197,6 +196,7 @@ pub trait GraphStore {
     /// community-opposition "todo queue" of `PendingOpposition` stubs).
     fn list_by_status(&self, status: NodeStatus) -> Result<Vec<DecisionNode>, Self::Error>;
 }
+
 
 #[cfg(test)]
 mod tests {

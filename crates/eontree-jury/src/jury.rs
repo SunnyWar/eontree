@@ -26,32 +26,6 @@ pub struct NodeMetrics {
     pub explanatory_power: f32,
     pub solution_relevance: f32,
 }
-
-impl NodeMetrics {
-    fn weighted_pairs(&self, weights: &MetricWeights) -> [(f32, f32); 6] {
-        [
-            (self.plausibility, weights.plausibility),
-            (self.evidence_strength, weights.evidence_strength),
-            (self.predictive_power, weights.predictive_power),
-            (self.novelty, weights.novelty),
-            (self.explanatory_power, weights.explanatory_power),
-            (self.solution_relevance, weights.solution_relevance),
-        ]
-    }
-}
-
-fn average_metrics(samples: &[NodeMetrics]) -> NodeMetrics {
-    let n = samples.len() as f32;
-    NodeMetrics {
-        plausibility: samples.iter().map(|m| m.plausibility).sum::<f32>() / n,
-        evidence_strength: samples.iter().map(|m| m.evidence_strength).sum::<f32>() / n,
-        predictive_power: samples.iter().map(|m| m.predictive_power).sum::<f32>() / n,
-        novelty: samples.iter().map(|m| m.novelty).sum::<f32>() / n,
-        explanatory_power: samples.iter().map(|m| m.explanatory_power).sum::<f32>() / n,
-        solution_relevance: samples.iter().map(|m| m.solution_relevance).sum::<f32>() / n,
-    }
-}
-
 // Per-dimension contribution weights used when folding NodeMetrics into a single
 // composite score. The Default baseline sums to 1.0, but composite_score
 // normalizes against the actual total so custom weightings need not sum exactly.
@@ -65,19 +39,6 @@ pub struct MetricWeights {
     pub solution_relevance: f32,
 }
 
-impl Default for MetricWeights {
-    fn default() -> Self {
-        Self {
-            plausibility: 0.25,
-            evidence_strength: 0.25,
-            predictive_power: 0.15,
-            novelty: 0.1,
-            explanatory_power: 0.15,
-            solution_relevance: 0.1,
-        }
-    }
-}
-
 // A graded-merit evaluation of a node, replacing rigid binary pass/fail judging.
 // composite_score is the weight-normalized sum of all six metric dimensions; a
 // node is approved only if that composite meets or exceeds passing_threshold.
@@ -87,6 +48,32 @@ pub struct NodeScorecard {
     pub weights: MetricWeights,
     pub passing_threshold: f32,
     pub rationales: HashMap<String, String>,
+}
+
+// Raw per-judge opinion prior to being folded into a NodeScorecard.
+#[derive(Debug, Serialize, Deserialize)]
+struct JudgeOpinion {
+    judge_id: String,
+    metrics: NodeMetrics,
+    critique: String,
+}
+
+pub struct LLMJudgeClient {
+    client: Client,
+    endpoint_urls: [String; 3],
+}
+
+impl NodeMetrics {
+    fn weighted_pairs(&self, weights: &MetricWeights) -> [(f32, f32); 6] {
+        [
+            (self.plausibility, weights.plausibility),
+            (self.evidence_strength, weights.evidence_strength),
+            (self.predictive_power, weights.predictive_power),
+            (self.novelty, weights.novelty),
+            (self.explanatory_power, weights.explanatory_power),
+            (self.solution_relevance, weights.solution_relevance),
+        ]
+    }
 }
 
 impl NodeScorecard {
@@ -121,30 +108,6 @@ impl NodeScorecard {
     pub fn is_approved(&self) -> bool {
         self.composite_score() >= self.passing_threshold
     }
-}
-
-// The minimum composite score required for a node to be approved, scaled by how
-// foundational or safety-critical its type is: axioms and barriers are held to a
-// higher bar than exploratory Unknown nodes.
-fn default_passing_threshold(node_type: NodeType) -> f32 {
-    match node_type {
-        NodeType::Root | NodeType::Barrier => 0.9,
-        NodeType::Problem | NodeType::Innovation => 0.75,
-        NodeType::Unknown => 0.6,
-    }
-}
-
-// Raw per-judge opinion prior to being folded into a NodeScorecard.
-#[derive(Debug, Serialize, Deserialize)]
-struct JudgeOpinion {
-    judge_id: String,
-    metrics: NodeMetrics,
-    critique: String,
-}
-
-pub struct LLMJudgeClient {
-    client: Client,
-    endpoint_urls: [String; 3],
 }
 
 impl LLMJudgeClient {
@@ -232,6 +195,43 @@ impl LLMJudgeClient {
         })
     }
 }
+
+impl Default for MetricWeights {
+    fn default() -> Self {
+        Self {
+            plausibility: 0.25,
+            evidence_strength: 0.25,
+            predictive_power: 0.15,
+            novelty: 0.1,
+            explanatory_power: 0.15,
+            solution_relevance: 0.1,
+        }
+    }
+}
+
+fn average_metrics(samples: &[NodeMetrics]) -> NodeMetrics {
+    let n = samples.len() as f32;
+    NodeMetrics {
+        plausibility: samples.iter().map(|m| m.plausibility).sum::<f32>() / n,
+        evidence_strength: samples.iter().map(|m| m.evidence_strength).sum::<f32>() / n,
+        predictive_power: samples.iter().map(|m| m.predictive_power).sum::<f32>() / n,
+        novelty: samples.iter().map(|m| m.novelty).sum::<f32>() / n,
+        explanatory_power: samples.iter().map(|m| m.explanatory_power).sum::<f32>() / n,
+        solution_relevance: samples.iter().map(|m| m.solution_relevance).sum::<f32>() / n,
+    }
+}
+
+// The minimum composite score required for a node to be approved, scaled by how
+// foundational or safety-critical its type is: axioms and barriers are held to a
+// higher bar than exploratory Unknown nodes.
+fn default_passing_threshold(node_type: NodeType) -> f32 {
+    match node_type {
+        NodeType::Root | NodeType::Barrier => 0.9,
+        NodeType::Problem | NodeType::Innovation => 0.75,
+        NodeType::Unknown => 0.6,
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

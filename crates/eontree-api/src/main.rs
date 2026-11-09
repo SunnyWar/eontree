@@ -10,6 +10,43 @@ use eontree_jury::{GlobalSentinel, LLMJudgeClient, NodeScorecard};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+// Templates for the mandatory adversarial counter-nodes spawned alongside every
+// Innovation/Problem proposal: an objection, a failure mode, and a competing
+// alternative, each left as a PendingOpposition stub for the community to flesh
+// out. These are deterministic, server-authored content, so they are written
+// directly to the store rather than re-entering the public ingestion pipeline
+// (no Sentinel/taxonomy re-check against the submitter's own node).
+const ADVERSARIAL_TEMPLATES: [(&str, NodeType, &str); 3] = [
+    (
+        "Objections to: ",
+        NodeType::Barrier,
+        "Potential drawbacks, ethical concerns, or logical flaws.",
+    ),
+    (
+        "Failure Modes of: ",
+        NodeType::Barrier,
+        "Conditions under which this approach breaks down catastrophically.",
+    ),
+    (
+        "Competing Alternatives to: ",
+        NodeType::Unknown,
+        "Alternative methods achieving the same objective.",
+    ),
+];
+
+// Rejection outcomes for node ingestion. Signature and Sentinel failures remain
+// strictly binary hard invariants; JuryRejected carries the graded scorecard that
+// produced the rejection so callers can audit exactly which criteria fell short.
+#[derive(Debug)]
+enum PostNodeError {
+    InvalidSignature,
+    PolicyViolation,
+    JuryRejected(NodeScorecard),
+    Internal,
+    ParentNotFound,
+    InvalidTaxonomy,
+}
+
 struct AppState {
     store: Mutex<RedbStore>,
     jury: LLMJudgeClient,
@@ -18,6 +55,21 @@ struct AppState {
     // carry a valid self-contained signature, so the system signs its own
     // stubs rather than bypassing verification for them.
     system_signing_key: ed25519_dalek::SigningKey,
+}
+
+impl IntoResponse for PostNodeError {
+    fn into_response(self) -> Response {
+        match self {
+            PostNodeError::InvalidSignature => StatusCode::BAD_REQUEST.into_response(),
+            PostNodeError::PolicyViolation => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+            PostNodeError::JuryRejected(scorecard) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(scorecard)).into_response()
+            }
+            PostNodeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            PostNodeError::ParentNotFound => StatusCode::NOT_FOUND.into_response(),
+            PostNodeError::InvalidTaxonomy => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -99,58 +151,6 @@ async fn get_todos_handler(
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
-
-// Rejection outcomes for node ingestion. Signature and Sentinel failures remain
-// strictly binary hard invariants; JuryRejected carries the graded scorecard that
-// produced the rejection so callers can audit exactly which criteria fell short.
-#[derive(Debug)]
-enum PostNodeError {
-    InvalidSignature,
-    PolicyViolation,
-    JuryRejected(NodeScorecard),
-    Internal,
-    ParentNotFound,
-    InvalidTaxonomy,
-}
-
-impl IntoResponse for PostNodeError {
-    fn into_response(self) -> Response {
-        match self {
-            PostNodeError::InvalidSignature => StatusCode::BAD_REQUEST.into_response(),
-            PostNodeError::PolicyViolation => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-            PostNodeError::JuryRejected(scorecard) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, Json(scorecard)).into_response()
-            }
-            PostNodeError::Internal => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            PostNodeError::ParentNotFound => StatusCode::NOT_FOUND.into_response(),
-            PostNodeError::InvalidTaxonomy => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
-        }
-    }
-}
-
-// Templates for the mandatory adversarial counter-nodes spawned alongside every
-// Innovation/Problem proposal: an objection, a failure mode, and a competing
-// alternative, each left as a PendingOpposition stub for the community to flesh
-// out. These are deterministic, server-authored content, so they are written
-// directly to the store rather than re-entering the public ingestion pipeline
-// (no Sentinel/taxonomy re-check against the submitter's own node).
-const ADVERSARIAL_TEMPLATES: [(&str, NodeType, &str); 3] = [
-    (
-        "Objections to: ",
-        NodeType::Barrier,
-        "Potential drawbacks, ethical concerns, or logical flaws.",
-    ),
-    (
-        "Failure Modes of: ",
-        NodeType::Barrier,
-        "Conditions under which this approach breaks down catastrophically.",
-    ),
-    (
-        "Competing Alternatives to: ",
-        NodeType::Unknown,
-        "Alternative methods achieving the same objective.",
-    ),
-];
 
 fn spawn_mandatory_counter_nodes<S: GraphStore>(
     store: &mut S,
@@ -238,6 +238,7 @@ async fn post_node_handler(
 
     Ok(StatusCode::CREATED)
 }
+
 
 #[cfg(test)]
 mod tests {

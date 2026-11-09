@@ -3,17 +3,6 @@ use eontree_core::{DecisionNode, NodeType};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(name = "eontree")]
-#[command(
-    about = "CLI tool for authoring, signing, and submitting EonTree knowledge nodes.",
-    version
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
 #[derive(Subcommand)]
 enum Commands {
     /// Generate a new Ed25519 cryptographic keypair
@@ -67,6 +56,17 @@ enum Commands {
         #[arg(short, long, default_value = "claimed_node.json")]
         output: PathBuf,
     },
+}
+
+#[derive(Parser)]
+#[command(name = "eontree")]
+#[command(
+    about = "CLI tool for authoring, signing, and submitting EonTree knowledge nodes.",
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
 #[tokio::main]
@@ -289,6 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
